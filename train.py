@@ -293,11 +293,31 @@ def main() -> None:
     optimizer_G = torch.optim.Adam(netG.parameters(), lr=LR, betas=(BETA1, BETA2))
     optimizer_D = torch.optim.Adam(netD.parameters(), lr=LR, betas=(BETA1, BETA2))
 
+    RESUME = True  # set False when you want to start from scratch
+
+    CHECKPOINT_PATH = "checkpoints/pix2pix_epoch_2.pth"  # ← change to latest checkpoint
+
+    start_epoch = 1
+
+    if RESUME and os.path.exists(CHECKPOINT_PATH):
+        print(f"Resuming training from checkpoint: {CHECKPOINT_PATH}")
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+
+        netG.load_state_dict(checkpoint["netG_state_dict"])
+        netD.load_state_dict(checkpoint["netD_state_dict"])
+        optimizer_G.load_state_dict(checkpoint["optimizer_G_state_dict"])
+        optimizer_D.load_state_dict(checkpoint["optimizer_D_state_dict"])
+
+        start_epoch = checkpoint["epoch"] + 1
+        print(f"Resuming from epoch {start_epoch}")
+    else:
+        print("Starting training from scratch.")
+
     print("\n" + "=" * 60)
     print("Starting training...")
     print("=" * 60)
 
-    for epoch in range(1, NUM_EPOCHS + 1):
+    for epoch in range(start_epoch, NUM_EPOCHS + 1):
         train_one_epoch(
             epoch=epoch,
             train_loader=train_loader,

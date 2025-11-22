@@ -13,6 +13,10 @@ venv/
 checkpoints/
 samples/
 
+# Ignore model weights explicitly
+*.pth
+*.pt
+
 # IDE files
 .vscode/
 .idea/
