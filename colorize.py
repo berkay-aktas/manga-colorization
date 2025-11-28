@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import List, Tuple
 
 import torch
-import torchvision.transforms.functional as TF
 from PIL import Image
 
+from inference_utils import TilingConfig, colorize_with_tiling
 from networks import UNetGenerator
+from preprocessing import SKETCH_TRANSFORM
 from utils import get_device, save_image
 
 
@@ -65,39 +66,23 @@ def load_model(
     return netG
 
 
-def preprocess_image(image_path: str) -> torch.Tensor:
+def preprocess_pil_image(img: Image.Image) -> torch.Tensor:
     """
     Preprocess input image to match training format.
-    
-    Loads image, converts to grayscale, resizes to 256x256,
-    normalizes to [-1, 1], and adds batch dimension.
-    
-    Args:
-        image_path: Path to input image
-    
-    Returns:
-        Preprocessed tensor of shape [1, 1, 256, 256] in range [-1, 1]
     """
-    # Load image
-    img = Image.open(image_path)
-    
-    # Convert to grayscale (force 1 channel)
     if img.mode != 'L':
         img = img.convert('L')
     
-    # Resize to 256x256 (matching training)
-    img = TF.resize(img, (256, 256), interpolation=TF.InterpolationMode.BILINEAR)
-    
-    # Convert to tensor [1, H, W] in range [0, 1]
-    tensor = TF.to_tensor(img)
-    
-    # Normalize to [-1, 1] (matching training)
-    tensor = TF.normalize(tensor, mean=[0.5], std=[0.5])
-    
-    # Add batch dimension [1, 1, 256, 256]
+    tensor = SKETCH_TRANSFORM(img)
     tensor = tensor.unsqueeze(0)
     
     return tensor
+
+
+def preprocess_image(image_path: str) -> torch.Tensor:
+    """Backward-compatible wrapper that loads the image then preprocesses it."""
+    img = Image.open(image_path)
+    return preprocess_pil_image(img)
 
 
 def infer_single_image(
@@ -129,6 +114,8 @@ def process_single_image(
     input_path: str,
     output_dir: str,
     device: torch.device,
+    tiling_config: TilingConfig,
+    enable_tiling: bool,
 ) -> None:
     """
     Process a single input image and save colorized output.
@@ -139,11 +126,20 @@ def process_single_image(
         output_dir: Directory to save output
         device: Device to run inference on
     """
-    # Preprocess image
-    input_tensor = preprocess_image(input_path)
-    
-    # Run inference
-    output_tensor = infer_single_image(netG, input_tensor, device)
+    img = Image.open(input_path).convert("L")
+
+    if enable_tiling and (
+        img.width > tiling_config.tile_size or img.height > tiling_config.tile_size
+    ):
+        output_tensor = colorize_with_tiling(
+            gray_image=img,
+            netG=netG,
+            device=device,
+            config=tiling_config,
+        )
+    else:
+        input_tensor = preprocess_pil_image(img)
+        output_tensor = infer_single_image(netG, input_tensor, device)
     
     # Generate output filename
     input_basename = Path(input_path).stem
@@ -171,14 +167,12 @@ def get_image_files(input_path: str) -> List[str]:
         raise FileNotFoundError(f"Input path not found: {input_path}")
     
     if input_path.is_file():
-        # Single file
         if input_path.suffix.lower() in ['.png', '.jpg', '.jpeg']:
             return [str(input_path)]
         else:
             raise ValueError(f"Unsupported image format: {input_path.suffix}")
     
     elif input_path.is_dir():
-        # Directory - find all image files
         image_extensions = ['.png', '.jpg', '.jpeg']
         image_files = []
         
@@ -200,6 +194,8 @@ def process_folder(
     input_path: str,
     output_dir: str,
     device: torch.device,
+    tiling_config: TilingConfig,
+    enable_tiling: bool,
 ) -> None:
     """
     Process all images in a folder.
@@ -216,7 +212,14 @@ def process_folder(
     
     for i, image_path in enumerate(image_files, 1):
         print(f"Processing [{i}/{len(image_files)}]: {Path(image_path).name}")
-        process_single_image(netG, image_path, output_dir, device)
+        process_single_image(
+            netG=netG,
+            input_path=image_path,
+            output_dir=output_dir,
+            device=device,
+            tiling_config=tiling_config,
+            enable_tiling=enable_tiling,
+        )
 
 
 def main() -> None:
@@ -245,6 +248,26 @@ def main() -> None:
         required=True,
         help="Path to Generator checkpoint file (.pth)"
     )
+
+    parser.add_argument(
+        "--tile_size",
+        type=int,
+        default=256,
+        help="Tile size for high-resolution inference (default: 256)",
+    )
+
+    parser.add_argument(
+        "--overlap",
+        type=int,
+        default=64,
+        help="Tile overlap/padding to reduce seams (default: 64)",
+    )
+
+    parser.add_argument(
+        "--disable_tiling",
+        action="store_true",
+        help="Force classic 256x256 resizing instead of tiling",
+    )
     
     parser.add_argument(
         "--in_channels",
@@ -262,11 +285,9 @@ def main() -> None:
     
     args = parser.parse_args()
     
-    # Get device
     device = get_device()
     print(f"Using device: {device}")
     
-    # Create output directory
     Path(args.output).mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {args.output}")
     
@@ -288,12 +309,27 @@ def main() -> None:
     
     input_path = Path(args.input)
     
+    tiling_config = TilingConfig(tile_size=args.tile_size, overlap=args.overlap)
+    enable_tiling = not args.disable_tiling
+
     if input_path.is_file():
-        # Single image
-        process_single_image(netG, args.input, args.output, device)
+        process_single_image(
+            netG=netG,
+            input_path=args.input,
+            output_dir=args.output,
+            device=device,
+            tiling_config=tiling_config,
+            enable_tiling=enable_tiling,
+        )
     elif input_path.is_dir():
-        # Folder of images
-        process_folder(netG, args.input, args.output, device)
+        process_folder(
+            netG=netG,
+            input_path=args.input,
+            output_dir=args.output,
+            device=device,
+            tiling_config=tiling_config,
+            enable_tiling=enable_tiling,
+        )
     else:
         raise ValueError(f"Invalid input path: {args.input}")
     
@@ -304,4 +340,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
+    

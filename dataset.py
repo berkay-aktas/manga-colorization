@@ -18,6 +18,8 @@ from PIL import Image
 import numpy as np
 import cv2
 
+from preprocessing import SKETCH_TRANSFORM, COLOR_TRANSFORM
+
 
 class PairedImageDataset(Dataset):
     """
@@ -103,17 +105,8 @@ class PairedImageDataset(Dataset):
         if self.augment:
             sketch_img, color_img = self._apply_augmentations(sketch_img, color_img)
         
-        # Resize to 256x256
-        sketch_img = TF.resize(sketch_img, (256, 256), interpolation=TF.InterpolationMode.BILINEAR)
-        color_img = TF.resize(color_img, (256, 256), interpolation=TF.InterpolationMode.BILINEAR)
-        
-        # Convert to tensors
-        sketch_tensor = TF.to_tensor(sketch_img)  # [1, 256, 256] in [0, 1]
-        color_tensor = TF.to_tensor(color_img)    # [3, 256, 256] in [0, 1]
-        
-        # Normalize to [-1, 1]
-        sketch_tensor = TF.normalize(sketch_tensor, mean=[0.5], std=[0.5])
-        color_tensor = TF.normalize(color_tensor, mean=[0.5] * 3, std=[0.5] * 3)
+        sketch_tensor = SKETCH_TRANSFORM(sketch_img)  # [1, 256, 256]
+        color_tensor = COLOR_TRANSFORM(color_img)    # [3, 256, 256]
         
         return {
             "A": sketch_tensor,  # [1, 256, 256]
@@ -216,17 +209,8 @@ class ColorToEdgeDataset(Dataset):
         if self.augment:
             sketch_img, color_img = self._apply_augmentations(sketch_img, color_img)
         
-        # Resize to 256x256
-        sketch_img = TF.resize(sketch_img, (256, 256), interpolation=TF.InterpolationMode.BILINEAR)
-        color_img = TF.resize(color_img, (256, 256), interpolation=TF.InterpolationMode.BILINEAR)
-        
-        # Convert to tensors
-        sketch_tensor = TF.to_tensor(sketch_img)  # [1, 256, 256] in [0, 1]
-        color_tensor = TF.to_tensor(color_img)    # [3, 256, 256] in [0, 1]
-        
-        # Normalize to [-1, 1]
-        sketch_tensor = TF.normalize(sketch_tensor, mean=[0.5], std=[0.5])
-        color_tensor = TF.normalize(color_tensor, mean=[0.5] * 3, std=[0.5] * 3)
+        sketch_tensor = SKETCH_TRANSFORM(sketch_img)  # [1, 256, 256]
+        color_tensor = COLOR_TRANSFORM(color_img)    # [3, 256, 256]
         
         return {
             "A": sketch_tensor,  # [1, 256, 256]
@@ -290,4 +274,4 @@ class ColorToEdgeDataset(Dataset):
         color_img = TF.rotate(color_img, angle, interpolation=TF.InterpolationMode.BILINEAR, fill=255)
         
         return sketch_img, color_img
-
+        

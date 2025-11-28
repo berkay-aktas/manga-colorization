@@ -169,4 +169,4 @@ class PatchGANDiscriminator(nn.Module):
             For 256x256 input, output is [B, 1, 30, 30]
         """
         return self.model(x)
-
+        

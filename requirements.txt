@@ -1,6 +1,8 @@
 torch
 torchvision
 torchaudio
+numpy
 opencv-python
 pillow
 matplotlib
+gradio
