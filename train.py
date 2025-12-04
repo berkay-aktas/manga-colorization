@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, random_split
 
 from dataset import PairedImageDataset
 from networks import UNetGenerator, PatchGANDiscriminator
@@ -39,7 +39,7 @@ BATCH_SIZE = 4
 LR = 2e-4
 BETA1 = 0.5
 BETA2 = 0.999
-LAMBDA_L1 = 100.0
+LAMBDA_L1 = 50.0  # Reduced from 100.0 for better color vibrancy
 
 # Logging and output
 CHECKPOINT_DIR = "checkpoints"
@@ -55,16 +55,16 @@ PIN_MEMORY = True
 SEED = 42
 
 
-def create_data_loaders() -> DataLoader:
+def create_data_loaders():
     """
-    Create data loader for training.
+    Create data loaders for training and validation.
 
     Combines two paired datasets:
       - Anime sketch/color pairs
       - Manga bw/color pairs
 
     Returns:
-        DataLoader for the combined dataset.
+        Tuple of (train_loader, val_loader) with 80/20 split.
     """
     # Paired anime dataset (sketch → color)
     anime_dataset = PairedImageDataset(
@@ -82,22 +82,41 @@ def create_data_loaders() -> DataLoader:
 
     # Combine datasets
     combined_dataset = ConcatDataset([anime_dataset, manga_dataset])
+    
+    # Split into train/val (80/20)
+    total_size = len(combined_dataset)
+    train_size = int(0.8 * total_size)
+    val_size = total_size - train_size
+    train_dataset, val_dataset = random_split(
+        combined_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(SEED)
+    )
 
-    # DataLoader
+    # DataLoaders
     train_loader = DataLoader(
-        combined_dataset,
+        train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
     )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+    )
 
-    print(f"Total training samples: {len(combined_dataset)}")
+    print(f"Total samples: {total_size}")
+    print(f"  - Training samples: {len(train_dataset)}")
+    print(f"  - Validation samples: {len(val_dataset)}")
     print(f"  - Anime paired samples: {len(anime_dataset)}")
     print(f"  - Manga paired samples: {len(manga_dataset)}")
-    print(f"Batches per epoch: {len(train_loader)}")
+    print(f"Batches per epoch (train): {len(train_loader)}")
 
-    return train_loader
+    return train_loader, val_loader
 
 
 def initialize_models(device: torch.device) -> tuple[UNetGenerator, PatchGANDiscriminator]:
@@ -122,6 +141,25 @@ def initialize_models(device: torch.device) -> tuple[UNetGenerator, PatchGANDisc
     print(f"Discriminator parameters: {sum(p.numel() for p in netD.parameters()):,}")
 
     return netG, netD
+
+
+def validate(val_loader: DataLoader, netG: UNetGenerator, criterion_L1: torch.nn.L1Loss, device: torch.device) -> float:
+    """
+    Validate the generator on validation set.
+    
+    Returns:
+        Average L1 loss on validation set.
+    """
+    netG.eval()
+    total_l1 = 0.0
+    with torch.no_grad():
+        for batch in val_loader:
+            real_A = batch["A"].to(device)
+            real_B = batch["B"].to(device)
+            fake_B = netG(real_A)
+            total_l1 += criterion_L1(fake_B, real_B).item()
+    netG.train()
+    return total_l1 / len(val_loader)
 
 
 def train_one_epoch(
@@ -166,19 +204,20 @@ def train_one_epoch(
         # Real pair: (A, B)
         real_input = torch.cat([real_A, real_B], dim=1)  # [B, 4, H, W]
         pred_real = netD(real_input)
-        target_real = torch.ones_like(pred_real)
+        target_real = torch.ones_like(pred_real) * 0.9  # Label smoothing: 0.9 instead of 1.0
         loss_D_real = criterion_GAN(pred_real, target_real)
 
         # Fake pair: (A, G(A))
         fake_input = torch.cat([real_A, fake_B.detach()], dim=1)  # [B, 4, H, W]
         pred_fake = netD(fake_input)
-        target_fake = torch.zeros_like(pred_fake)
+        target_fake = torch.zeros_like(pred_fake) + 0.1  # Label smoothing: 0.1 instead of 0.0
         loss_D_fake = criterion_GAN(pred_fake, target_fake)
 
         loss_D = 0.5 * (loss_D_real + loss_D_fake)
 
         optimizer_D.zero_grad()
         loss_D.backward()
+        torch.nn.utils.clip_grad_norm_(netD.parameters(), max_norm=1.0)  # Gradient clipping
         optimizer_D.step()
 
         # ============================================================
@@ -189,7 +228,7 @@ def train_one_epoch(
 
         fake_input_for_G = torch.cat([real_A, fake_B], dim=1)
         pred_fake_for_G = netD(fake_input_for_G)
-        target_real_for_G = torch.ones_like(pred_fake_for_G)
+        target_real_for_G = torch.ones_like(pred_fake_for_G) * 0.9  # Label smoothing: 0.9
 
         loss_G_GAN = criterion_GAN(pred_fake_for_G, target_real_for_G)
         loss_G_L1 = criterion_L1(fake_B, real_B) * LAMBDA_L1
@@ -197,6 +236,7 @@ def train_one_epoch(
 
         optimizer_G.zero_grad()
         loss_G.backward()
+        torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=1.0)  # Gradient clipping
         optimizer_G.step()
 
         # ============================================================
@@ -280,7 +320,7 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("Setting up data loaders...")
     print("=" * 60)
-    train_loader = create_data_loaders()
+    train_loader, val_loader = create_data_loaders()
 
     print("\n" + "=" * 60)
     print("Initializing models...")
@@ -292,10 +332,14 @@ def main() -> None:
 
     optimizer_G = torch.optim.Adam(netG.parameters(), lr=LR, betas=(BETA1, BETA2))
     optimizer_D = torch.optim.Adam(netD.parameters(), lr=LR, betas=(BETA1, BETA2))
+    
+    # Learning rate schedulers
+    scheduler_G = torch.optim.lr_scheduler.ExponentialLR(optimizer_G, gamma=0.95)
+    scheduler_D = torch.optim.lr_scheduler.ExponentialLR(optimizer_D, gamma=0.95)
 
     RESUME = True  # set False when you want to start from scratch
 
-    CHECKPOINT_PATH = "checkpoints/pix2pix_epoch_2.pth"  # ← change to latest checkpoint
+    CHECKPOINT_PATH = "checkpoints/pix2pix_epoch_28.pth"  # ← change to latest checkpoint
 
     start_epoch = 1
 
@@ -317,6 +361,8 @@ def main() -> None:
     print("Starting training...")
     print("=" * 60)
 
+    best_val_loss = float('inf')
+    
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         train_one_epoch(
             epoch=epoch,
@@ -329,8 +375,28 @@ def main() -> None:
             criterion_L1=criterion_L1,
             device=device,
         )
-
+        
+        # Validate and save best checkpoint
+        val_loss = validate(val_loader, netG, criterion_L1, device)
+        print(f"Epoch [{epoch}/{NUM_EPOCHS}] Validation L1 Loss: {val_loss:.4f}")
+        
         save_checkpoint(epoch, netG, netD, optimizer_G, optimizer_D)
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_path = os.path.join(CHECKPOINT_DIR, "pix2pix_best.pth")
+            torch.save({
+                "epoch": epoch,
+                "netG_state_dict": netG.state_dict(),
+                "netD_state_dict": netD.state_dict(),
+                "val_loss": val_loss,
+            }, best_path)
+            print(f"Saved best checkpoint with val_loss={val_loss:.4f}")
+        
+        # Update learning rates
+        scheduler_G.step()
+        scheduler_D.step()
+        print(f"Learning rates: G={scheduler_G.get_last_lr()[0]:.6f}, D={scheduler_D.get_last_lr()[0]:.6f}")
 
     print("\n" + "=" * 60)
     print("Training completed!")

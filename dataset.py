@@ -266,8 +266,8 @@ class ColorToEdgeDataset(Dataset):
             sketch_img = TF.hflip(sketch_img)
             color_img = TF.hflip(color_img)
         
-        # Random rotation (±5 degrees)
-        angle = random.uniform(-5.0, 5.0)
+        # Random rotation (±2 degrees) - reduced from ±5 to avoid edge artifacts
+        angle = random.uniform(-2.0, 2.0)
         # Fill with white for sketch (inverted edges), white for color
         sketch_fill = 255 if self.invert_edges else 0
         sketch_img = TF.rotate(sketch_img, angle, interpolation=TF.InterpolationMode.BILINEAR, fill=sketch_fill)
