@@ -11,14 +11,14 @@ from inference_utils import TilingConfig, colorize_with_tiling
 from preprocessing import SKETCH_TRANSFORM
 
 
-CHECKPOINT_PATH = "checkpoints/pix2pix_epoch_45.pth"
+CHECKPOINT_PATH = "checkpoints/pix2pix_best.pth"
 CHECKPOINT_DIR = Path("checkpoints")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 _netG_cache: dict[str, UNetGenerator] = {}
 _checkpoint_label_map: dict[str, str] = {}
-TILING_CONFIG = TilingConfig(tile_size=256, overlap=64)
+TILING_CONFIG = TilingConfig(tile_size=256, overlap=128, blend_mode="feather")
 
 
 def list_available_checkpoints() -> list[Path]:
@@ -32,7 +32,7 @@ def list_available_checkpoints() -> list[Path]:
 
 def format_checkpoint_label(path: Path) -> str:
     """
-    Produce a clean, human-friendly label like 'Epoch 45'.
+    Produce a clean, human-friendly label.
     """
     match = re.search(r"(\d+)", path.stem)
     if match:
@@ -117,7 +117,7 @@ def load_generator(checkpoint_path: str) -> UNetGenerator:
     return netG
 
 
-def colorize(input_image: Image.Image, checkpoint_label: str) -> Image.Image:
+def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option: bool = False) -> Image.Image:
     """
     Gradio callback:
     - takes a PIL image (B/W manga panel)
@@ -135,25 +135,31 @@ def colorize(input_image: Image.Image, checkpoint_label: str) -> Image.Image:
     gray = input_image.convert("L")
     netG = load_generator(checkpoint_path)
 
-    use_tiling = max(orig_w, orig_h) > TILING_CONFIG.tile_size
+    # User can choose to disable tiling to avoid prismatic artifacts
+    # Tiling causes color inconsistencies because model has no global context
+    # Without tiling: resize to 256x256, process, resize back (no artifacts, but lower res)
+    use_tiling = use_tiling_option and max(orig_w, orig_h) > 256
 
     if use_tiling:
+        # For large images, use tiling (will have some artifacts)
         fake_B = colorize_with_tiling(
             gray_image=gray,
             netG=netG,
             device=DEVICE,
             config=TILING_CONFIG,
         )
+        fake_B = torch.clamp((fake_B + 1.0) / 2.0, 0.0, 1.0)
+        fake_img = fake_B.squeeze(0).cpu()
+        fake_img = transforms.ToPILImage()(fake_img)
     else:
+        # For smaller images, resize to 256x256 and back (no artifacts, but lower res)
         tensor = SKETCH_TRANSFORM(gray).unsqueeze(0).to(DEVICE)
         with torch.no_grad():
             fake_B = netG(tensor)  # [-1,1], [1,3,256,256]
 
-    fake_B = torch.clamp((fake_B + 1.0) / 2.0, 0.0, 1.0)
-    fake_img = fake_B.squeeze(0).cpu()
-    fake_img = transforms.ToPILImage()(fake_img)
-
-    if not use_tiling:
+        fake_B = torch.clamp((fake_B + 1.0) / 2.0, 0.0, 1.0)
+        fake_img = fake_B.squeeze(0).cpu()
+        fake_img = transforms.ToPILImage()(fake_img)
         fake_img = fake_img.resize((orig_w, orig_h), Image.BICUBIC)
 
     return fake_img
@@ -181,6 +187,11 @@ with gr.Blocks(title="Manga Colorization Demo") as demo:
                 label="Choose Checkpoint",
                 interactive=True,
             )
+            use_tiling_checkbox = gr.Checkbox(
+                value=False,
+                label="Use High-Resolution Tiling (may have color artifacts)",
+                info="Uncheck to avoid prismatic/rainbow effects. Will resize images instead."
+            )
             run_btn = gr.Button("Colorize")
         with gr.Column(scale=1):
             output_color = gr.Image(
@@ -190,7 +201,7 @@ with gr.Blocks(title="Manga Colorization Demo") as demo:
 
     run_btn.click(
         fn=colorize,
-        inputs=[input_img, checkpoint_selector],
+        inputs=[input_img, checkpoint_selector, use_tiling_checkbox],
         outputs=output_color,
     )
 

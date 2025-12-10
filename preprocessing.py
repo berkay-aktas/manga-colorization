@@ -7,7 +7,7 @@ from torchvision import transforms
 
 SKETCH_TRANSFORM = transforms.Compose(
     [
-        transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.BILINEAR),
+        transforms.Resize((512, 512), interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5], std=[0.5]),
     ]
@@ -16,7 +16,7 @@ SKETCH_TRANSFORM = transforms.Compose(
 
 COLOR_TRANSFORM = transforms.Compose(
     [
-        transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.BILINEAR),
+        transforms.Resize((512, 512), interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ]

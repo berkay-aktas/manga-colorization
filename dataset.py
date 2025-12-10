@@ -9,7 +9,7 @@ This module provides two dataset classes:
 import os
 from pathlib import Path
 from typing import Dict, Tuple, Optional
-import random
+import random   
 
 import torch
 from torch.utils.data import Dataset
@@ -92,8 +92,8 @@ class PairedImageDataset(Dataset):
         
         Returns:
             Dictionary with keys:
-                "A": Sketch tensor [1, 256, 256] normalized to [-1, 1]
-                "B": Color tensor [3, 256, 256] normalized to [-1, 1]
+                "A": Sketch tensor [1, 512, 512] normalized to [-1, 1]
+                "B": Color tensor [3, 512, 512] normalized to [-1, 1]
         """
         sketch_path, color_path = self.pairs[idx]
         
@@ -194,8 +194,8 @@ class ColorToEdgeDataset(Dataset):
         
         Returns:
             Dictionary with keys:
-                "A": Edge/sketch tensor [1, 256, 256] normalized to [-1, 1]
-                "B": Color tensor [3, 256, 256] normalized to [-1, 1]
+                "A": Edge/sketch tensor [1, 512, 512] normalized to [-1, 1]
+                "B": Color tensor [3, 512, 512] normalized to [-1, 1]
         """
         color_path = self.color_files[idx]
         
@@ -209,12 +209,12 @@ class ColorToEdgeDataset(Dataset):
         if self.augment:
             sketch_img, color_img = self._apply_augmentations(sketch_img, color_img)
         
-        sketch_tensor = SKETCH_TRANSFORM(sketch_img)  # [1, 256, 256]
-        color_tensor = COLOR_TRANSFORM(color_img)    # [3, 256, 256]
+        sketch_tensor = SKETCH_TRANSFORM(sketch_img)  # [1, 512, 512]
+        color_tensor = COLOR_TRANSFORM(color_img)    # [3, 512, 512]
         
         return {
-            "A": sketch_tensor,  # [1, 256, 256]
-            "B": color_tensor    # [3, 256, 256]
+            "A": sketch_tensor,  # [1, 512, 512]
+            "B": color_tensor    # [3, 512, 512]
         }
     
     def _generate_edge_map(self, color_img: Image.Image) -> Image.Image:

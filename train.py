@@ -2,10 +2,12 @@
 Training script for Pix2Pix Manga Colorization
 
 This script trains a Pix2Pix conditional GAN to colorize black-and-white
-anime/manga images using **paired** datasets:
+manga images using **paired** manga dataset (bw/color pages).
 
-1) Anime Sketch Colorization Pair (split into sketch/color)
-2) Manga dataset with paired bw/color pages
+Training configuration:
+- Resolution: 512x512 (for better text readability)
+- Dataset: Manga-only (bw/color pairs)
+- Epochs: 150
 
 It implements the standard Pix2Pix training loop with GAN loss and L1 loss,
 handles logging, sample saving, and checkpointing.
@@ -15,7 +17,7 @@ import os
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, ConcatDataset, random_split
+from torch.utils.data import DataLoader, random_split
 
 from dataset import PairedImageDataset
 from networks import UNetGenerator, PatchGANDiscriminator
@@ -34,12 +36,12 @@ MANGA_SKETCH_DIR = "data/manga_dataset/bw"
 MANGA_COLOR_DIR = "data/manga_dataset/color"
 
 # Training hyperparameters
-NUM_EPOCHS = 100
-BATCH_SIZE = 4
+NUM_EPOCHS = 150
+BATCH_SIZE = 2  # Reduced from 4 for 512x512 resolution (4x memory usage)
 LR = 2e-4
 BETA1 = 0.5
 BETA2 = 0.999
-LAMBDA_L1 = 50.0  # Reduced from 100.0 for better color vibrancy
+LAMBDA_L1 = 100.0  # Increased for better detail preservation at 512x512
 
 # Logging and output
 CHECKPOINT_DIR = "checkpoints"
@@ -59,36 +61,24 @@ def create_data_loaders():
     """
     Create data loaders for training and validation.
 
-    Combines two paired datasets:
-      - Anime sketch/color pairs
-      - Manga bw/color pairs
+    Uses only manga dataset (bw/color pairs) for manga-specific colorization.
 
     Returns:
         Tuple of (train_loader, val_loader) with 80/20 split.
     """
-    # Paired anime dataset (sketch → color)
-    anime_dataset = PairedImageDataset(
-        sketch_dir=ANIME_SKETCH_DIR,
-        color_dir=ANIME_COLOR_DIR,
-        augment=True,
-    )
-
     # Paired manga dataset (bw → color)
     manga_dataset = PairedImageDataset(
         sketch_dir=MANGA_SKETCH_DIR,
         color_dir=MANGA_COLOR_DIR,
         augment=True,
     )
-
-    # Combine datasets
-    combined_dataset = ConcatDataset([anime_dataset, manga_dataset])
     
     # Split into train/val (80/20)
-    total_size = len(combined_dataset)
+    total_size = len(manga_dataset)
     train_size = int(0.8 * total_size)
     val_size = total_size - train_size
     train_dataset, val_dataset = random_split(
-        combined_dataset, [train_size, val_size],
+        manga_dataset, [train_size, val_size],
         generator=torch.Generator().manual_seed(SEED)
     )
 
@@ -112,7 +102,6 @@ def create_data_loaders():
     print(f"Total samples: {total_size}")
     print(f"  - Training samples: {len(train_dataset)}")
     print(f"  - Validation samples: {len(val_dataset)}")
-    print(f"  - Anime paired samples: {len(anime_dataset)}")
     print(f"  - Manga paired samples: {len(manga_dataset)}")
     print(f"Batches per epoch (train): {len(train_loader)}")
 
@@ -258,9 +247,16 @@ def train_one_epoch(
         # ============================================================
 
         if (iteration + 1) % SAMPLE_INTERVAL == 0:
-            sample_real_B = real_B[0:1]   # [1, 3, H, W]
-            sample_fake_B = fake_B[0:1]   # [1, 3, H, W]
+            sample_real_A = real_A[0:1]   # [1, 1, H, W] - input BW
+            sample_real_B = real_B[0:1]   # [1, 3, H, W] - ground truth color
+            sample_fake_B = fake_B[0:1]   # [1, 3, H, W] - generated color
 
+            # Save input BW (convert to RGB for easier viewing by repeating channel)
+            sample_real_A_rgb = sample_real_A.repeat(1, 3, 1, 1)  # [1, 3, H, W]
+            save_image(
+                sample_real_A_rgb,
+                os.path.join(SAMPLE_DIR, f"epoch_{epoch}_iter_{iteration + 1}_real_A.png"),
+            )
             save_image(
                 sample_real_B,
                 os.path.join(SAMPLE_DIR, f"epoch_{epoch}_iter_{iteration + 1}_real_B.png"),
@@ -270,7 +266,7 @@ def train_one_epoch(
                 os.path.join(SAMPLE_DIR, f"epoch_{epoch}_iter_{iteration + 1}_fake_B.png"),
             )
 
-            print(f"Saved sample images at epoch {epoch}, iteration {iteration + 1}")
+            print(f"Saved sample images at epoch {epoch}, iteration {iteration + 1} (input BW, ground truth, generated)")
 
 
 def save_checkpoint(
