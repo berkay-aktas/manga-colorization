@@ -133,4 +133,4 @@ def get_device() -> torch.device:
         torch.device object representing the computation device
     """
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    

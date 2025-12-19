@@ -1,10 +1,8 @@
 from pathlib import Path
 from PIL import Image
 
-# Where your combined (left color + right sketch) images are:
 RAW_DIR = Path("data/anime_pair/train")
 
-# Where we want to save the split halves:
 OUT_COLOR = Path("data/anime_pair/color")
 OUT_SKETCH = Path("data/anime_pair/sketch")
 

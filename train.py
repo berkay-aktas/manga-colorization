@@ -14,6 +14,8 @@ handles logging, sample saving, and checkpointing.
 """
 
 import os
+import signal
+import sys
 from pathlib import Path
 
 import torch
@@ -52,6 +54,10 @@ CHECKPOINT_DIR = "checkpoints"
 SAMPLE_DIR = "samples"
 LOG_INTERVAL = 100  # iterations
 SAMPLE_INTERVAL = 500  # iterations
+
+# Checkpoint management
+KEEP_LAST_N_CHECKPOINTS = 3  # Keep only last N checkpoints to save disk space
+SAVE_CHECKPOINT_INTERVAL = 5  # Save checkpoint every N epochs (set to 1 to save every epoch)
 
 # Data loading
 NUM_WORKERS = 4
@@ -305,12 +311,85 @@ def train_one_epoch(
             print(f"Saved sample images at epoch {epoch}, iteration {iteration + 1} (input BW, ground truth, generated)")
 
 
+# Global variables for emergency checkpoint saving
+_emergency_save_vars = {
+    'netG': None,
+    'netD': None,
+    'optimizer_G': None,
+    'optimizer_D': None,
+    'current_epoch': 0,
+    'device': None,
+}
+
+
+def emergency_save_checkpoint(signum=None, frame=None):
+    """
+    Emergency checkpoint save on interruption (Ctrl+C).
+    Saves current state so training can be resumed.
+    """
+    if _emergency_save_vars['netG'] is None:
+        print("\nNo model to save. Exiting...")
+        sys.exit(0)
+    
+    print("\n\n" + "=" * 60)
+    print("INTERRUPTED! Saving emergency checkpoint...")
+    print("=" * 60)
+    
+    try:
+        emergency_path = os.path.join(CHECKPOINT_DIR, "pix2pix_emergency.pth")
+        torch.save({
+            "epoch": _emergency_save_vars['current_epoch'],
+            "netG_state_dict": _emergency_save_vars['netG'].state_dict(),
+            "netD_state_dict": _emergency_save_vars['netD'].state_dict(),
+            "optimizer_G_state_dict": _emergency_save_vars['optimizer_G'].state_dict(),
+            "optimizer_D_state_dict": _emergency_save_vars['optimizer_D'].state_dict(),
+            "emergency": True,
+        }, emergency_path)
+        print(f"Emergency checkpoint saved: {emergency_path}")
+        print("You can resume training by setting:")
+        print(f'  CHECKPOINT_PATH = "{emergency_path}"')
+        print("=" * 60)
+    except Exception as e:
+        print(f"ERROR: Could not save emergency checkpoint: {e}")
+    
+    sys.exit(0)
+
+
+def cleanup_old_checkpoints(keep_last_n: int = 5) -> None:
+    """
+    Remove old checkpoints, keeping only the last N and the best checkpoint.
+    
+    Args:
+        keep_last_n: Number of recent checkpoints to keep
+    """
+    checkpoint_dir = Path(CHECKPOINT_DIR)
+    if not checkpoint_dir.exists():
+        return
+    
+    # Get all epoch checkpoints (not best checkpoint)
+    epoch_checkpoints = sorted(
+        checkpoint_dir.glob("pix2pix_epoch_*.pth"),
+        key=lambda x: int(x.stem.split("_")[-1]) if x.stem.split("_")[-1].isdigit() else 0
+    )
+    
+    # Keep only the last N checkpoints
+    if len(epoch_checkpoints) > keep_last_n:
+        checkpoints_to_delete = epoch_checkpoints[:-keep_last_n]
+        for cp in checkpoints_to_delete:
+            try:
+                cp.unlink()
+                print(f"Deleted old checkpoint: {cp.name}")
+            except Exception as e:
+                print(f"Warning: Could not delete {cp.name}: {e}")
+
+
 def save_checkpoint(
     epoch: int,
     netG: UNetGenerator,
     netD: PatchGANDiscriminator,
     optimizer_G: torch.optim.Adam,
     optimizer_D: torch.optim.Adam,
+    save_always: bool = False,
 ) -> None:
     """
     Save training checkpoint.
@@ -321,8 +400,13 @@ def save_checkpoint(
         netD: Discriminator model.
         optimizer_G: Generator optimizer.
         optimizer_D: Discriminator optimizer.
+        save_always: If True, save regardless of interval (for best checkpoint)
     """
     Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
+
+    # Only save at intervals (unless save_always is True)
+    if not save_always and epoch % SAVE_CHECKPOINT_INTERVAL != 0:
+        return
 
     checkpoint_path = os.path.join(CHECKPOINT_DIR, f"pix2pix_epoch_{epoch}.pth")
     torch.save(
@@ -337,6 +421,9 @@ def save_checkpoint(
     )
 
     print(f"Checkpoint saved: {checkpoint_path}")
+    
+    # Cleanup old checkpoints (keep only last N)
+    cleanup_old_checkpoints(KEEP_LAST_N_CHECKPOINTS)
 
 
 def main() -> None:
@@ -371,7 +458,17 @@ def main() -> None:
 
     RESUME = True  # set False when you want to start from scratch
 
+    # Check for emergency checkpoint first, then regular checkpoint
     CHECKPOINT_PATH = "checkpoints/pix2pix_epoch_28.pth"  # ← change to latest checkpoint
+    EMERGENCY_CHECKPOINT = "checkpoints/pix2pix_emergency.pth"
+    
+    # Prefer emergency checkpoint if it exists (means training was interrupted)
+    if os.path.exists(EMERGENCY_CHECKPOINT):
+        print(f"Found emergency checkpoint: {EMERGENCY_CHECKPOINT}")
+        print("This checkpoint was saved when training was interrupted.")
+        use_emergency = input("Use emergency checkpoint? (y/n): ").lower().strip() == 'y'
+        if use_emergency:
+            CHECKPOINT_PATH = EMERGENCY_CHECKPOINT
 
     start_epoch = 1
 
@@ -392,44 +489,78 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("Starting training...")
     print("=" * 60)
+    print("Press Ctrl+C to stop and save emergency checkpoint")
+    print("=" * 60)
 
     best_val_loss = float('inf')
     
-    for epoch in range(start_epoch, NUM_EPOCHS + 1):
-        train_one_epoch(
-            epoch=epoch,
-            train_loader=train_loader,
-            netG=netG,
-            netD=netD,
-            optimizer_G=optimizer_G,
-            optimizer_D=optimizer_D,
-            criterion_GAN=criterion_GAN,
-            criterion_L1=criterion_L1,
-            device=device,
-        )
-        
-        # Validate and save best checkpoint
-        val_loss = validate(val_loader, netG, criterion_L1, device)
-        print(f"Epoch [{epoch}/{NUM_EPOCHS}] Validation L1 Loss: {val_loss:.4f}")
-        
-        save_checkpoint(epoch, netG, netD, optimizer_G, optimizer_D)
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_path = os.path.join(CHECKPOINT_DIR, "pix2pix_best.pth")
-            torch.save({
-                "epoch": epoch,
-                "netG_state_dict": netG.state_dict(),
-                "netD_state_dict": netD.state_dict(),
-                "val_loss": val_loss,
-            }, best_path)
-            print(f"Saved best checkpoint with val_loss={val_loss:.4f}")
-        
-        # Update learning rates
-        scheduler_G.step()
-        scheduler_D.step()
-        print(f"Learning rates: G={scheduler_G.get_last_lr()[0]:.6f}, D={scheduler_D.get_last_lr()[0]:.6f}")
-
+    # Store references for emergency save
+    _emergency_save_vars['netG'] = netG
+    _emergency_save_vars['netD'] = netD
+    _emergency_save_vars['optimizer_G'] = optimizer_G
+    _emergency_save_vars['optimizer_D'] = optimizer_D
+    _emergency_save_vars['device'] = device
+    
+    try:
+        for epoch in range(start_epoch, NUM_EPOCHS + 1):
+            _emergency_save_vars['current_epoch'] = epoch
+            
+            train_one_epoch(
+                epoch=epoch,
+                train_loader=train_loader,
+                netG=netG,
+                netD=netD,
+                optimizer_G=optimizer_G,
+                optimizer_D=optimizer_D,
+                criterion_GAN=criterion_GAN,
+                criterion_L1=criterion_L1,
+                device=device,
+            )
+            
+            # Validate and save best checkpoint
+            val_loss = validate(val_loader, netG, criterion_L1, device)
+            print(f"Epoch [{epoch}/{NUM_EPOCHS}] Validation L1 Loss: {val_loss:.4f}")
+            
+            # Save checkpoint at intervals
+            save_checkpoint(epoch, netG, netD, optimizer_G, optimizer_D, save_always=False)
+            
+            # Always save best checkpoint (regardless of interval)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_path = os.path.join(CHECKPOINT_DIR, "pix2pix_best.pth")
+                torch.save({
+                    "epoch": epoch,
+                    "netG_state_dict": netG.state_dict(),
+                    "netD_state_dict": netD.state_dict(),
+                    "val_loss": val_loss,
+                }, best_path)
+                print(f"Saved best checkpoint with val_loss={val_loss:.4f}")
+            
+            # Save last checkpoint (for resuming) - always save the most recent
+            if epoch == NUM_EPOCHS or (epoch % SAVE_CHECKPOINT_INTERVAL == 0):
+                last_path = os.path.join(CHECKPOINT_DIR, "pix2pix_last.pth")
+                torch.save({
+                    "epoch": epoch,
+                    "netG_state_dict": netG.state_dict(),
+                    "netD_state_dict": netD.state_dict(),
+                    "optimizer_G_state_dict": optimizer_G.state_dict(),
+                    "optimizer_D_state_dict": optimizer_D.state_dict(),
+                    "val_loss": val_loss,
+                }, last_path)
+            
+            # Update learning rates
+            scheduler_G.step()
+            scheduler_D.step()
+            print(f"Learning rates: G={scheduler_G.get_last_lr()[0]:.6f}, D={scheduler_D.get_last_lr()[0]:.6f}")
+    
+    except KeyboardInterrupt:
+        # This will be handled by signal handler, but just in case
+        emergency_save_checkpoint()
+    except Exception as e:
+        print(f"\nError during training: {e}")
+        emergency_save_checkpoint()
+        raise
+    
     print("\n" + "=" * 60)
     print("Training completed!")
     print("=" * 60)
