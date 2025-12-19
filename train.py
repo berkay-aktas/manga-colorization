@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, ConcatDataset
 
 from dataset import PairedImageDataset
 from networks import UNetGenerator, PatchGANDiscriminator
@@ -29,11 +29,15 @@ from utils import init_weights, save_image, set_seed, get_device
 # ============================================================================#
 
 # Data roots (paired datasets)
-ANIME_SKETCH_DIR = "data/anime_pair/sketch"
-ANIME_COLOR_DIR = "data/anime_pair/color"
+# Old dataset (12k matched pairs)
+OLD_MANGA_SKETCH_DIR = "data/manga_dataset/bw"
+OLD_MANGA_COLOR_DIR = "data/manga_dataset/color"
 
-MANGA_SKETCH_DIR = "data/manga_dataset/bw"
-MANGA_COLOR_DIR = "data/manga_dataset/color"
+# New dataset (colored_manga - make sure B/W conversion is complete!)
+NEW_MANGA_SKETCH_DIR = "data/colored_manga/bw"
+NEW_MANGA_COLOR_DIR = "data/colored_manga/color_full"
+
+USE_BOTH_DATASETS = True
 
 # Training hyperparameters
 NUM_EPOCHS = 150
@@ -61,17 +65,46 @@ def create_data_loaders():
     """
     Create data loaders for training and validation.
 
-    Uses only manga dataset (bw/color pairs) for manga-specific colorization.
+    Uses manga dataset(s) (bw/color pairs) for manga-specific colorization.
+    Can combine old and new datasets if USE_BOTH_DATASETS is True.
 
     Returns:
         Tuple of (train_loader, val_loader) with 80/20 split.
     """
-    # Paired manga dataset (bw → color)
-    manga_dataset = PairedImageDataset(
-        sketch_dir=MANGA_SKETCH_DIR,
-        color_dir=MANGA_COLOR_DIR,
-        augment=True,
-    )
+    datasets = []
+    
+    # Old dataset (12k matched pairs)
+    if USE_BOTH_DATASETS:
+        try:
+            old_dataset = PairedImageDataset(
+                sketch_dir=OLD_MANGA_SKETCH_DIR,
+                color_dir=OLD_MANGA_COLOR_DIR,
+                augment=True,
+            )
+            datasets.append(old_dataset)
+            print(f"Loaded old dataset: {len(old_dataset)} pairs")
+        except Exception as e:
+            print(f"Warning: Could not load old dataset: {e}")
+    
+    # New dataset (colored_manga)
+    try:
+        new_dataset = PairedImageDataset(
+            sketch_dir=NEW_MANGA_SKETCH_DIR,
+            color_dir=NEW_MANGA_COLOR_DIR,
+            augment=True,
+        )
+        datasets.append(new_dataset)
+        print(f"Loaded new dataset: {len(new_dataset)} pairs")
+    except Exception as e:
+        print(f"Warning: Could not load new dataset: {e}")
+        if not USE_BOTH_DATASETS:
+            raise
+    
+    # Combine datasets if using both
+    if len(datasets) > 1:
+        manga_dataset = ConcatDataset(datasets)
+    else:
+        manga_dataset = datasets[0]
     
     # Split into train/val (80/20)
     total_size = len(manga_dataset)
@@ -102,7 +135,10 @@ def create_data_loaders():
     print(f"Total samples: {total_size}")
     print(f"  - Training samples: {len(train_dataset)}")
     print(f"  - Validation samples: {len(val_dataset)}")
-    print(f"  - Manga paired samples: {len(manga_dataset)}")
+    if len(datasets) > 1:
+        print(f"  - Combined datasets: {len(datasets)}")
+        for i, ds in enumerate(datasets):
+            print(f"    Dataset {i+1}: {len(ds)} pairs")
     print(f"Batches per epoch (train): {len(train_loader)}")
 
     return train_loader, val_loader
