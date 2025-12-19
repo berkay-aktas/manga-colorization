@@ -366,9 +366,10 @@ def cleanup_old_checkpoints(keep_last_n: int = 5) -> None:
     if not checkpoint_dir.exists():
         return
     
-    # Get all epoch checkpoints (not best checkpoint)
+    # Get all epoch checkpoints (not best checkpoint or emergency checkpoint)
     epoch_checkpoints = sorted(
-        checkpoint_dir.glob("pix2pix_epoch_*.pth"),
+        [cp for cp in checkpoint_dir.glob("pix2pix_epoch_*.pth") 
+         if "best" not in cp.name and "emergency" not in cp.name],
         key=lambda x: int(x.stem.split("_")[-1]) if x.stem.split("_")[-1].isdigit() else 0
     )
     
@@ -527,14 +528,26 @@ def main() -> None:
             # Always save best checkpoint (regardless of interval)
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                best_path = os.path.join(CHECKPOINT_DIR, "pix2pix_best.pth")
-                torch.save({
+                
+                # Save with epoch number in filename for clarity
+                best_path = os.path.join(CHECKPOINT_DIR, f"pix2pix_best_epoch_{epoch}.pth")
+                best_path_simple = os.path.join(CHECKPOINT_DIR, "pix2pix_best.pth")
+                
+                checkpoint_data = {
                     "epoch": epoch,
                     "netG_state_dict": netG.state_dict(),
                     "netD_state_dict": netD.state_dict(),
                     "val_loss": val_loss,
-                }, best_path)
-                print(f"Saved best checkpoint with val_loss={val_loss:.4f}")
+                }
+                
+                # Save with epoch number
+                torch.save(checkpoint_data, best_path)
+                # Also save as simple name for easy loading
+                torch.save(checkpoint_data, best_path_simple)
+                
+                print(f"⭐ Saved BEST checkpoint: Epoch {epoch} with val_loss={val_loss:.4f}")
+                print(f"   → {best_path}")
+                print(f"   → {best_path_simple} (alias)")
             
             # Save last checkpoint (for resuming) - always save the most recent
             if epoch == NUM_EPOCHS or (epoch % SAVE_CHECKPOINT_INTERVAL == 0):
