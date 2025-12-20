@@ -29,6 +29,10 @@ from dataset import PairedImageDataset
 from networks import UNetGenerator, PatchGANDiscriminator
 from utils import init_weights, save_image, set_seed, get_device
 from vgg_loss import VGGPerceptualLoss
+from lab_utils import (
+    rgb_to_lab, lab_to_rgb, normalize_lab, denormalize_lab,
+    extract_l_channel, extract_ab_channels, combine_l_ab
+)
 
 
 # ============================================================================#
@@ -56,7 +60,7 @@ LAMBDA_L1 = 100.0  # Increased for better detail preservation at 512x512
 LAMBDA_PERCEPTUAL = 10.0  # Weight for VGG perceptual loss (helps generalization)
 USE_PERCEPTUAL_LOSS = True  # Enable VGG perceptual loss for better generalization
 USE_SMOOTH_L1 = True  # Use SmoothL1 instead of L1 (more robust)
-USE_LAB_LOSS = False  # Compute loss in LAB color space (experimental)
+USE_LAB_COLORSPACE = True  # Use LAB color space (L channel input, AB channels output)
 
 # Logging and output
 CHECKPOINT_DIR = "checkpoints"
@@ -169,9 +173,15 @@ def initialize_models(device: torch.device) -> tuple[UNetGenerator, PatchGANDisc
     Returns:
         Tuple of (netG, netD) models.
     """
-    # Generator
-    netG = UNetGenerator(in_channels=1, out_channels=3, ngf=64).to(device)
+    # Generator - output 2 channels (AB) if using LAB, 3 channels (RGB) otherwise
+    out_channels = 2 if USE_LAB_COLORSPACE else 3
+    netG = UNetGenerator(in_channels=1, out_channels=out_channels, ngf=64).to(device)
     netG.apply(lambda m: init_weights(m, init_type="normal", init_gain=0.02))
+    
+    if USE_LAB_COLORSPACE:
+        print("Using LAB color space: Model outputs 2 channels (AB)")
+    else:
+        print("Using RGB color space: Model outputs 3 channels (RGB)")
 
     # Discriminator (1 channel input + 3 channel target = 4)
     netD = PatchGANDiscriminator(in_channels=4, ndf=64).to(device)
@@ -195,9 +205,19 @@ def validate(val_loader: DataLoader, netG: UNetGenerator, criterion_L1: torch.nn
     with torch.no_grad():
         for batch in val_loader:
             real_A = batch["A"].to(device)
-            real_B = batch["B"].to(device)
+            real_B_rgb = batch["B"].to(device)  # RGB
+            
             fake_B = netG(real_A)
-            total_l1 += criterion_L1(fake_B, real_B).item()
+            
+            # Convert to appropriate format for loss computation
+            if USE_LAB_COLORSPACE:
+                real_B_lab = rgb_to_lab(real_B_rgb)
+                real_B_normalized = normalize_lab(real_B_lab)
+                target_B = extract_ab_channels(real_B_normalized)
+            else:
+                target_B = real_B_rgb
+            
+            total_l1 += criterion_L1(fake_B, target_B).item()
     netG.train()
     return total_l1 / len(val_loader)
 
@@ -233,7 +253,18 @@ def train_one_epoch(
 
     for iteration, batch in enumerate(train_loader):
         real_A = batch["A"].to(device)  # sketch / bw [B, 1, H, W]
-        real_B = batch["B"].to(device)  # color [B, 3, H, W]
+        real_B_rgb = batch["B"].to(device)  # color RGB [B, 3, H, W]
+        
+        # Convert to LAB if using LAB color space
+        if USE_LAB_COLORSPACE:
+            real_B_lab = rgb_to_lab(real_B_rgb)  # [B, 3, H, W] - full LAB
+            real_B_l = extract_l_channel(real_B_lab)  # [B, 1, H, W] - L channel
+            real_B_ab = extract_ab_channels(real_B_lab)  # [B, 2, H, W] - AB channels
+            real_B_normalized = normalize_lab(real_B_lab)  # Normalized LAB for loss
+            real_B_ab_normalized = extract_ab_channels(real_B_normalized)  # [B, 2, H, W] - normalized AB
+            target_B = real_B_ab_normalized  # Target is normalized AB channels
+        else:
+            target_B = real_B_rgb  # Target is RGB
 
         # ============================================================
         # (a) Train Discriminator
@@ -242,14 +273,23 @@ def train_one_epoch(
         with torch.no_grad():
             fake_B = netG(real_A)
 
+        # Convert fake output to RGB for discriminator (if using LAB)
+        if USE_LAB_COLORSPACE:
+            # Combine input L with predicted AB, convert to RGB
+            fake_B_lab_normalized = combine_l_ab(real_A, fake_B)  # [B, 3, H, W] - normalized LAB
+            fake_B_lab = denormalize_lab(fake_B_lab_normalized)  # Denormalize
+            fake_B_rgb = lab_to_rgb(fake_B_lab)  # Convert to RGB for discriminator
+        else:
+            fake_B_rgb = fake_B
+        
         # Real pair: (A, B)
-        real_input = torch.cat([real_A, real_B], dim=1)  # [B, 4, H, W]
+        real_input = torch.cat([real_A, real_B_rgb], dim=1)  # [B, 4, H, W]
         pred_real = netD(real_input)
         target_real = torch.ones_like(pred_real) * 0.9  # Label smoothing: 0.9 instead of 1.0
         loss_D_real = criterion_GAN(pred_real, target_real)
 
         # Fake pair: (A, G(A))
-        fake_input = torch.cat([real_A, fake_B.detach()], dim=1)  # [B, 4, H, W]
+        fake_input = torch.cat([real_A, fake_B_rgb.detach()], dim=1)  # [B, 4, H, W]
         pred_fake = netD(fake_input)
         target_fake = torch.zeros_like(pred_fake) + 0.1  # Label smoothing: 0.1 instead of 0.0
         loss_D_fake = criterion_GAN(pred_fake, target_fake)
@@ -265,21 +305,30 @@ def train_one_epoch(
         # (b) Train Generator
         # ============================================================
 
-        fake_B = netG(real_A)
+        fake_B = netG(real_A)  # [B, 2, H, W] if LAB, [B, 3, H, W] if RGB
+        
+        # Convert to RGB for discriminator and perceptual loss
+        if USE_LAB_COLORSPACE:
+            # Combine L channel with predicted AB
+            fake_B_lab_normalized = combine_l_ab(real_A, fake_B)  # [B, 3, H, W]
+            fake_B_lab = denormalize_lab(fake_B_lab_normalized)
+            fake_B_rgb = lab_to_rgb(fake_B_lab)  # [B, 3, H, W] - for discriminator/perceptual
+        else:
+            fake_B_rgb = fake_B
 
-        fake_input_for_G = torch.cat([real_A, fake_B], dim=1)
+        fake_input_for_G = torch.cat([real_A, fake_B_rgb], dim=1)
         pred_fake_for_G = netD(fake_input_for_G)
         target_real_for_G = torch.ones_like(pred_fake_for_G) * 0.9  # Label smoothing: 0.9
 
         loss_G_GAN = criterion_GAN(pred_fake_for_G, target_real_for_G)
         
-        # Compute L1/SmoothL1 loss
-        loss_G_L1 = criterion_L1(fake_B, real_B) * LAMBDA_L1
+        # Compute L1/SmoothL1 loss (on AB channels if LAB, RGB if RGB)
+        loss_G_L1 = criterion_L1(fake_B, target_B) * LAMBDA_L1
         
-        # Compute perceptual loss if enabled
+        # Compute perceptual loss if enabled (always on RGB)
         loss_G_perceptual = torch.tensor(0.0, device=device)
         if USE_PERCEPTUAL_LOSS and criterion_perceptual is not None:
-            loss_G_perceptual = criterion_perceptual(fake_B, real_B) * LAMBDA_PERCEPTUAL
+            loss_G_perceptual = criterion_perceptual(fake_B_rgb, real_B_rgb) * LAMBDA_PERCEPTUAL
         
         # Total generator loss
         loss_G = loss_G_GAN + loss_G_L1 + loss_G_perceptual
@@ -312,8 +361,16 @@ def train_one_epoch(
 
         if (iteration + 1) % SAMPLE_INTERVAL == 0:
             sample_real_A = real_A[0:1]   # [1, 1, H, W] - input BW
-            sample_real_B = real_B[0:1]   # [1, 3, H, W] - ground truth color
-            sample_fake_B = fake_B[0:1]   # [1, 3, H, W] - generated color
+            sample_real_B_rgb = real_B_rgb[0:1]   # [1, 3, H, W] - ground truth color RGB
+            
+            # Convert fake output to RGB if using LAB
+            if USE_LAB_COLORSPACE:
+                sample_fake_B_ab = fake_B[0:1]  # [1, 2, H, W] - generated AB
+                sample_fake_B_lab_norm = combine_l_ab(sample_real_A, sample_fake_B_ab)
+                sample_fake_B_lab = denormalize_lab(sample_fake_B_lab_norm)
+                sample_fake_B_rgb = lab_to_rgb(sample_fake_B_lab)  # [1, 3, H, W]
+            else:
+                sample_fake_B_rgb = fake_B[0:1]  # [1, 3, H, W]
 
             # Save input BW (convert to RGB for easier viewing by repeating channel)
             sample_real_A_rgb = sample_real_A.repeat(1, 3, 1, 1)  # [1, 3, H, W]
@@ -322,11 +379,11 @@ def train_one_epoch(
                 os.path.join(SAMPLE_DIR, f"epoch_{epoch}_iter_{iteration + 1}_real_A.png"),
             )
             save_image(
-                sample_real_B,
+                sample_real_B_rgb,
                 os.path.join(SAMPLE_DIR, f"epoch_{epoch}_iter_{iteration + 1}_real_B.png"),
             )
             save_image(
-                sample_fake_B,
+                sample_fake_B_rgb,
                 os.path.join(SAMPLE_DIR, f"epoch_{epoch}_iter_{iteration + 1}_fake_B.png"),
             )
 

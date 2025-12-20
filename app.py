@@ -116,18 +116,24 @@ def resolve_checkpoint_path(label: str) -> str:
     return CHECKPOINT_PATH
 
 
-def load_generator(checkpoint_path: str) -> UNetGenerator:
+def load_generator(checkpoint_path: str, use_lab: bool = True) -> UNetGenerator:
     """
     Load the generator once and reuse it.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file
+        use_lab: Whether model was trained with LAB color space (outputs 2 channels)
     """
-    if checkpoint_path in _netG_cache:
-        return _netG_cache[checkpoint_path]
+    cache_key = f"{checkpoint_path}_{use_lab}"
+    if cache_key in _netG_cache:
+        return _netG_cache[cache_key]
 
     if not Path(checkpoint_path).exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     print(f"Loading generator from {checkpoint_path} on {DEVICE}...")
-    netG = UNetGenerator(in_channels=1, out_channels=3, ngf=64)
+    out_channels = 2 if use_lab else 3
+    netG = UNetGenerator(in_channels=1, out_channels=out_channels, ngf=64)
 
     state = torch.load(checkpoint_path, map_location=DEVICE)
 
@@ -137,16 +143,19 @@ def load_generator(checkpoint_path: str) -> UNetGenerator:
     else:
         state_dict = state
 
-    netG.load_state_dict(state_dict)
+    netG.load_state_dict(state_dict, strict=False)  # Allow minor mismatches
     netG.to(DEVICE)
     netG.eval()
 
-    _netG_cache[checkpoint_path] = netG
-    print("Model loaded.")
+    _netG_cache[cache_key] = netG
+    if use_lab:
+        print("Model loaded (LAB color space - outputs 2 channels).")
+    else:
+        print("Model loaded (RGB color space - outputs 3 channels).")
     return netG
 
 
-def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option: bool = False) -> Image.Image:
+def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option: bool = False, use_lab: bool = True) -> Image.Image:
     """
     Gradio callback:
     - takes a PIL image (B/W manga panel)
@@ -162,13 +171,17 @@ def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option:
     checkpoint_path = resolve_checkpoint_path(checkpoint_label)
 
     gray = input_image.convert("L")
-    netG = load_generator(checkpoint_path)
+    netG = load_generator(checkpoint_path, use_lab=use_lab)
 
     # User can choose to disable tiling to avoid prismatic artifacts
     # Tiling causes color inconsistencies because model has no global context
     # Without tiling: resize to 512x512, process, resize back (no artifacts, but lower res)
     use_tiling = use_tiling_option and max(orig_w, orig_h) > 512
 
+    # Import LAB utilities if needed
+    if use_lab:
+        from lab_utils import combine_l_ab, denormalize_lab, lab_to_rgb
+    
     if use_tiling:
         # For large images, use tiling (will have some artifacts)
         fake_B = colorize_with_tiling(
@@ -177,6 +190,21 @@ def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option:
             device=DEVICE,
             config=TILING_CONFIG,
         )
+        # Convert LAB to RGB if needed
+        if use_lab:
+            # fake_B is [1, 2, H, W] - AB channels from tiling, need to combine with L
+            # Get L channel from the full gray image (resize to match tiling output size)
+            gray_tensor = SKETCH_TRANSFORM(gray).unsqueeze(0).to(DEVICE)  # [1, 1, 512, 512]
+            # Resize L to match fake_B size if needed
+            if gray_tensor.shape[2:] != fake_B.shape[2:]:
+                gray_tensor = torch.nn.functional.interpolate(
+                    gray_tensor, size=fake_B.shape[2:], mode='bilinear', align_corners=False
+                )
+            fake_B_lab_norm = combine_l_ab(gray_tensor, fake_B)  # [1, 3, H, W]
+            fake_B_lab = denormalize_lab(fake_B_lab_norm)
+            fake_B_rgb = lab_to_rgb(fake_B_lab)  # [1, 3, H, W]
+            fake_B = fake_B_rgb
+        
         fake_B = torch.clamp((fake_B + 1.0) / 2.0, 0.0, 1.0)
         fake_img = fake_B.squeeze(0).cpu()
         fake_img = transforms.ToPILImage()(fake_img)
@@ -184,7 +212,14 @@ def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option:
         # For smaller images, resize to 512x512 and back (no artifacts, but lower res)
         tensor = SKETCH_TRANSFORM(gray).unsqueeze(0).to(DEVICE)
         with torch.no_grad():
-            fake_B = netG(tensor)  # [-1,1], [1,3,512,512]
+            fake_B = netG(tensor)  # [-1,1], [1,2,512,512] if LAB, [1,3,512,512] if RGB
+        
+        # Convert LAB to RGB if needed
+        if use_lab:
+            fake_B_lab_norm = combine_l_ab(tensor, fake_B)  # [1, 3, H, W]
+            fake_B_lab = denormalize_lab(fake_B_lab_norm)
+            fake_B_rgb = lab_to_rgb(fake_B_lab)  # [1, 3, H, W]
+            fake_B = fake_B_rgb
 
         fake_B = torch.clamp((fake_B + 1.0) / 2.0, 0.0, 1.0)
         fake_img = fake_B.squeeze(0).cpu()
