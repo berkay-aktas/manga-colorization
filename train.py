@@ -9,8 +9,12 @@ Training configuration:
 - Dataset: Manga-only (bw/color pairs)
 - Epochs: 150
 
-It implements the standard Pix2Pix training loop with GAN loss and L1 loss,
-handles logging, sample saving, and checkpointing.
+It implements the standard Pix2Pix training loop with:
+- GAN loss (adversarial training)
+- L1/SmoothL1 loss (pixel-level reconstruction)
+- VGG perceptual loss (optional, for better generalization)
+
+Handles logging, sample saving, and checkpointing.
 """
 
 import os
@@ -24,6 +28,7 @@ from torch.utils.data import DataLoader, random_split, ConcatDataset
 from dataset import PairedImageDataset
 from networks import UNetGenerator, PatchGANDiscriminator
 from utils import init_weights, save_image, set_seed, get_device
+from vgg_loss import VGGPerceptualLoss
 
 
 # ============================================================================#
@@ -48,6 +53,10 @@ LR = 2e-4
 BETA1 = 0.5
 BETA2 = 0.999
 LAMBDA_L1 = 100.0  # Increased for better detail preservation at 512x512
+LAMBDA_PERCEPTUAL = 10.0  # Weight for VGG perceptual loss (helps generalization)
+USE_PERCEPTUAL_LOSS = True  # Enable VGG perceptual loss for better generalization
+USE_SMOOTH_L1 = True  # Use SmoothL1 instead of L1 (more robust)
+USE_LAB_LOSS = False  # Compute loss in LAB color space (experimental)
 
 # Logging and output
 CHECKPOINT_DIR = "checkpoints"
@@ -174,7 +183,7 @@ def initialize_models(device: torch.device) -> tuple[UNetGenerator, PatchGANDisc
     return netG, netD
 
 
-def validate(val_loader: DataLoader, netG: UNetGenerator, criterion_L1: torch.nn.L1Loss, device: torch.device) -> float:
+def validate(val_loader: DataLoader, netG: UNetGenerator, criterion_L1: torch.nn.Module, device: torch.device) -> float:
     """
     Validate the generator on validation set.
     
@@ -201,8 +210,9 @@ def train_one_epoch(
     optimizer_G: torch.optim.Adam,
     optimizer_D: torch.optim.Adam,
     criterion_GAN: torch.nn.BCEWithLogitsLoss,
-    criterion_L1: torch.nn.L1Loss,
-    device: torch.device,
+    criterion_L1: torch.nn.Module,
+    criterion_perceptual: torch.nn.Module = None,
+    device: torch.device = None,
 ) -> None:
     """
     Train for one epoch.
@@ -262,8 +272,17 @@ def train_one_epoch(
         target_real_for_G = torch.ones_like(pred_fake_for_G) * 0.9  # Label smoothing: 0.9
 
         loss_G_GAN = criterion_GAN(pred_fake_for_G, target_real_for_G)
+        
+        # Compute L1/SmoothL1 loss
         loss_G_L1 = criterion_L1(fake_B, real_B) * LAMBDA_L1
-        loss_G = loss_G_GAN + loss_G_L1
+        
+        # Compute perceptual loss if enabled
+        loss_G_perceptual = torch.tensor(0.0, device=device)
+        if USE_PERCEPTUAL_LOSS and criterion_perceptual is not None:
+            loss_G_perceptual = criterion_perceptual(fake_B, real_B) * LAMBDA_PERCEPTUAL
+        
+        # Total generator loss
+        loss_G = loss_G_GAN + loss_G_L1 + loss_G_perceptual
 
         optimizer_G.zero_grad()
         loss_G.backward()
@@ -275,7 +294,7 @@ def train_one_epoch(
         # ============================================================
 
         if (iteration + 1) % LOG_INTERVAL == 0:
-            print(
+            log_msg = (
                 f"Epoch [{epoch}/{NUM_EPOCHS}] "
                 f"Iteration [{iteration + 1}/{len(train_loader)}] "
                 f"Loss_D: {loss_D.item():.4f} "
@@ -283,6 +302,9 @@ def train_one_epoch(
                 f"Loss_G_GAN: {loss_G_GAN.item():.4f} "
                 f"Loss_G_L1: {loss_G_L1.item():.4f}"
             )
+            if USE_PERCEPTUAL_LOSS and criterion_perceptual is not None:
+                log_msg += f" Loss_G_Perceptual: {loss_G_perceptual.item():.4f}"
+            print(log_msg)
 
         # ============================================================
         # (d) Sample Saving
@@ -448,7 +470,24 @@ def main() -> None:
     netG, netD = initialize_models(device)
 
     criterion_GAN = torch.nn.BCEWithLogitsLoss()
-    criterion_L1 = torch.nn.L1Loss()
+    
+    # Use SmoothL1 if enabled, otherwise L1
+    if USE_SMOOTH_L1:
+        criterion_L1 = torch.nn.SmoothL1Loss()
+        print("Using SmoothL1 loss (more robust to outliers)")
+    else:
+        criterion_L1 = torch.nn.L1Loss()
+        print("Using L1 loss")
+    
+    # Initialize VGG perceptual loss if enabled
+    criterion_perceptual = None
+    if USE_PERCEPTUAL_LOSS:
+        print("Initializing VGG perceptual loss...")
+        criterion_perceptual = VGGPerceptualLoss().to(device)
+        criterion_perceptual.eval()  # VGG is always in eval mode
+        print(f"VGG perceptual loss enabled (weight: {LAMBDA_PERCEPTUAL})")
+    else:
+        print("VGG perceptual loss disabled")
 
     optimizer_G = torch.optim.Adam(netG.parameters(), lr=LR, betas=(BETA1, BETA2))
     optimizer_D = torch.optim.Adam(netD.parameters(), lr=LR, betas=(BETA1, BETA2))
@@ -515,6 +554,7 @@ def main() -> None:
                 optimizer_D=optimizer_D,
                 criterion_GAN=criterion_GAN,
                 criterion_L1=criterion_L1,
+                criterion_perceptual=criterion_perceptual,
                 device=device,
             )
             
