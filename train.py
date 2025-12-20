@@ -134,13 +134,15 @@ def create_data_loaders():
         generator=torch.Generator().manual_seed(SEED)
     )
 
-    # DataLoaders
+    # DataLoaders with optimizations
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
+        persistent_workers=True if NUM_WORKERS > 0 else False,  # Keep workers alive between epochs
+        prefetch_factor=2,  # Prefetch 2 batches ahead
     )
     
     val_loader = DataLoader(
@@ -149,6 +151,8 @@ def create_data_loaders():
         shuffle=False,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
+        persistent_workers=True if NUM_WORKERS > 0 else False,
+        prefetch_factor=2,
     )
 
     print(f"Total samples: {total_size}")
@@ -552,6 +556,17 @@ def main() -> None:
     # Learning rate schedulers
     scheduler_G = torch.optim.lr_scheduler.ExponentialLR(optimizer_G, gamma=0.95)
     scheduler_D = torch.optim.lr_scheduler.ExponentialLR(optimizer_D, gamma=0.95)
+    
+    # Mixed precision training (FP16)
+    USE_AMP = True  # Enable mixed precision training
+    scaler = None
+    if USE_AMP and device.type == 'cuda':
+        scaler = torch.cuda.amp.GradScaler()
+        print("✅ Mixed precision training (FP16) enabled - expect ~2x speedup!")
+    else:
+        if USE_AMP and device.type != 'cuda':
+            print("⚠️  Mixed precision requires CUDA. Disabling AMP.")
+        USE_AMP = False
 
     RESUME = True  # set False when you want to start from scratch
 
@@ -613,6 +628,8 @@ def main() -> None:
                 criterion_L1=criterion_L1,
                 criterion_perceptual=criterion_perceptual,
                 device=device,
+                scaler=scaler,
+                use_amp=USE_AMP,
             )
             
             # Validate and save best checkpoint
