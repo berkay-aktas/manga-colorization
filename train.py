@@ -65,12 +65,16 @@ USE_LAB_COLORSPACE = True  # Use LAB color space (L channel input, AB channels o
 # Logging and output
 CHECKPOINT_DIR = "checkpoints"
 SAMPLE_DIR = "samples"
-LOG_INTERVAL = 100  # iterations
-SAMPLE_INTERVAL = 500  # iterations
+LOG_INTERVAL = 1000  # iterations
+SAMPLE_INTERVAL = 5000  # iterations
 
 # Checkpoint management
 KEEP_LAST_N_CHECKPOINTS = 3  # Keep only last N checkpoints to save disk space
 SAVE_CHECKPOINT_INTERVAL = 5  # Save checkpoint every N epochs (set to 1 to save every epoch)
+
+# Early stopping
+USE_EARLY_STOPPING = True  # Enable early stopping if validation loss plateaus
+EARLY_STOPPING_PATIENCE = 15  # Stop if no improvement for N epochs (allows temporary plateaus)
 
 # Data loading
 NUM_WORKERS = 4
@@ -529,6 +533,24 @@ def main() -> None:
     print("Initializing models...")
     print("=" * 60)
     netG, netD = initialize_models(device)
+    
+    # Enable cuDNN benchmark for faster training (input size is consistent: 512x512)
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+        print("✅ cuDNN benchmark enabled (faster convolutions)")
+    
+    # Compile models for faster training (PyTorch 2.0+)
+    USE_COMPILE = True
+    if USE_COMPILE and hasattr(torch, 'compile'):
+        try:
+            print("Compiling models with torch.compile()...")
+            netG = torch.compile(netG, mode='reduce-overhead')  # Fast compilation, good for training
+            netD = torch.compile(netD, mode='reduce-overhead')
+            print("✅ Models compiled - expect 20-30% speedup!")
+        except Exception as e:
+            print(f"⚠️  torch.compile() failed: {e}. Continuing without compilation.")
+    elif USE_COMPILE:
+        print("⚠️  torch.compile() requires PyTorch 2.0+. Skipping compilation.")
 
     criterion_GAN = torch.nn.BCEWithLogitsLoss()
     
@@ -605,6 +627,14 @@ def main() -> None:
     print("=" * 60)
 
     best_val_loss = float('inf')
+    best_epoch = 0
+    epochs_without_improvement = 0
+    
+    # Early stopping info
+    if USE_EARLY_STOPPING:
+        print(f"Early stopping enabled (patience: {EARLY_STOPPING_PATIENCE} epochs)")
+    else:
+        print(f"Early stopping disabled - will train for full {NUM_EPOCHS} epochs")
     
     # Store references for emergency save
     _emergency_save_vars['netG'] = netG
@@ -639,9 +669,13 @@ def main() -> None:
             # Save checkpoint at intervals
             save_checkpoint(epoch, netG, netD, optimizer_G, optimizer_D, save_always=False)
             
-            # Always save best checkpoint (regardless of interval)
-            if val_loss < best_val_loss:
+            # Check for improvement
+            improved = val_loss < best_val_loss
+            
+            if improved:
                 best_val_loss = val_loss
+                best_epoch = epoch
+                epochs_without_improvement = 0
                 
                 # Save with epoch number in filename for clarity
                 best_path = os.path.join(CHECKPOINT_DIR, f"pix2pix_best_epoch_{epoch}.pth")
@@ -662,6 +696,22 @@ def main() -> None:
                 print(f"⭐ Saved BEST checkpoint: Epoch {epoch} with val_loss={val_loss:.4f}")
                 print(f"   → {best_path}")
                 print(f"   → {best_path_simple} (alias)")
+            else:
+                epochs_without_improvement += 1
+                if USE_EARLY_STOPPING:
+                    print(f"   No improvement for {epochs_without_improvement}/{EARLY_STOPPING_PATIENCE} epochs")
+            
+            # Early stopping check
+            if USE_EARLY_STOPPING and epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+                print("\n" + "=" * 60)
+                print(f"🛑 EARLY STOPPING TRIGGERED")
+                print("=" * 60)
+                print(f"Validation loss has not improved for {EARLY_STOPPING_PATIENCE} epochs.")
+                print(f"Best validation loss: {best_val_loss:.4f} (at epoch {best_epoch})")
+                print(f"Stopping training at epoch {epoch}.")
+                print(f"Best checkpoint saved: pix2pix_best.pth")
+                print("=" * 60)
+                break
             
             # Save last checkpoint (for resuming) - always save the most recent
             if epoch == NUM_EPOCHS or (epoch % SAVE_CHECKPOINT_INTERVAL == 0):
