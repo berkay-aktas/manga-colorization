@@ -268,8 +268,6 @@ def train_one_epoch(
         # Convert to LAB if using LAB color space
         if USE_LAB_COLORSPACE:
             real_B_lab = rgb_to_lab(real_B_rgb)  # [B, 3, H, W] - full LAB
-            real_B_l = extract_l_channel(real_B_lab)  # [B, 1, H, W] - L channel
-            real_B_ab = extract_ab_channels(real_B_lab)  # [B, 2, H, W] - AB channels
             real_B_normalized = normalize_lab(real_B_lab)  # Normalized LAB for loss
             real_B_ab_normalized = extract_ab_channels(real_B_normalized)  # [B, 2, H, W] - normalized AB
             target_B = real_B_ab_normalized  # Target is normalized AB channels
@@ -325,18 +323,21 @@ def train_one_epoch(
         # (b) Train Generator
         # ============================================================
 
+        # Generate fake_B in autocast
         with torch.cuda.amp.autocast(enabled=use_amp):
             fake_B = netG(real_A)  # [B, 2, H, W] if LAB, [B, 3, H, W] if RGB
-            
-            # Convert to RGB for discriminator and perceptual loss
-            if USE_LAB_COLORSPACE:
-                # Combine L channel with predicted AB
-                fake_B_lab_normalized = combine_l_ab(real_A, fake_B)  # [B, 3, H, W]
-                fake_B_lab = denormalize_lab(fake_B_lab_normalized)
-                fake_B_rgb = lab_to_rgb(fake_B_lab)  # [B, 3, H, W] - for discriminator/perceptual
-            else:
-                fake_B_rgb = fake_B
+        
+        # Convert to RGB for discriminator and perceptual loss (outside autocast - LAB conversion uses CPU)
+        if USE_LAB_COLORSPACE:
+            # Combine L channel with predicted AB
+            fake_B_lab_normalized = combine_l_ab(real_A, fake_B)  # [B, 3, H, W]
+            fake_B_lab = denormalize_lab(fake_B_lab_normalized)
+            fake_B_rgb = lab_to_rgb(fake_B_lab)  # [B, 3, H, W] - for discriminator/perceptual
+        else:
+            fake_B_rgb = fake_B
 
+        # Discriminator and loss computation in autocast
+        with torch.cuda.amp.autocast(enabled=use_amp):
             fake_input_for_G = torch.cat([real_A, fake_B_rgb], dim=1)
             pred_fake_for_G = netD(fake_input_for_G)
             target_real_for_G = torch.ones_like(pred_fake_for_G) * 0.9  # Label smoothing: 0.9
@@ -632,8 +633,14 @@ def main() -> None:
 
         netG.load_state_dict(checkpoint["netG_state_dict"])
         netD.load_state_dict(checkpoint["netD_state_dict"])
-        optimizer_G.load_state_dict(checkpoint["optimizer_G_state_dict"])
-        optimizer_D.load_state_dict(checkpoint["optimizer_D_state_dict"])
+        
+        # Load optimizer states if they exist (best checkpoints don't have them)
+        if "optimizer_G_state_dict" in checkpoint and "optimizer_D_state_dict" in checkpoint:
+            optimizer_G.load_state_dict(checkpoint["optimizer_G_state_dict"])
+            optimizer_D.load_state_dict(checkpoint["optimizer_D_state_dict"])
+            print("Loaded optimizer states")
+        else:
+            print("Warning: Optimizer states not found in checkpoint. Starting with fresh optimizers.")
 
         start_epoch = checkpoint["epoch"] + 1
         print(f"Resuming from epoch {start_epoch}")
@@ -662,6 +669,14 @@ def main() -> None:
     _emergency_save_vars['optimizer_G'] = optimizer_G
     _emergency_save_vars['optimizer_D'] = optimizer_D
     _emergency_save_vars['device'] = device
+    
+    # Register signal handler for Ctrl+C (emergency checkpoint)
+    try:
+        signal.signal(signal.SIGINT, emergency_save_checkpoint)
+        print("✅ Emergency checkpoint handler registered (Ctrl+C)")
+    except (ValueError, OSError) as e:
+        print(f"⚠️  Could not register signal handler: {e}")
+        print("   Emergency checkpoint will still work via try/except")
     
     try:
         for epoch in range(start_epoch, NUM_EPOCHS + 1):
