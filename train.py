@@ -241,6 +241,8 @@ def train_one_epoch(
     criterion_L1: torch.nn.Module,
     criterion_perceptual: torch.nn.Module = None,
     device: torch.device = None,
+    scaler: torch.cuda.amp.GradScaler = None,
+    use_amp: bool = False,
 ) -> None:
     """
     Train for one epoch.
@@ -278,8 +280,10 @@ def train_one_epoch(
         # (a) Train Discriminator
         # ============================================================
 
-        with torch.no_grad():
-            fake_B = netG(real_A)
+        # Use autocast for mixed precision
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.no_grad():
+                fake_B = netG(real_A)
 
         # Convert fake output to RGB for discriminator (if using LAB)
         if USE_LAB_COLORSPACE:
@@ -291,60 +295,76 @@ def train_one_epoch(
             fake_B_rgb = fake_B
         
         # Real pair: (A, B)
-        real_input = torch.cat([real_A, real_B_rgb], dim=1)  # [B, 4, H, W]
-        pred_real = netD(real_input)
-        target_real = torch.ones_like(pred_real) * 0.9  # Label smoothing: 0.9 instead of 1.0
-        loss_D_real = criterion_GAN(pred_real, target_real)
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            real_input = torch.cat([real_A, real_B_rgb], dim=1)  # [B, 4, H, W]
+            pred_real = netD(real_input)
+            target_real = torch.ones_like(pred_real) * 0.9  # Label smoothing: 0.9 instead of 1.0
+            loss_D_real = criterion_GAN(pred_real, target_real)
 
-        # Fake pair: (A, G(A))
-        fake_input = torch.cat([real_A, fake_B_rgb.detach()], dim=1)  # [B, 4, H, W]
-        pred_fake = netD(fake_input)
-        target_fake = torch.zeros_like(pred_fake) + 0.1  # Label smoothing: 0.1 instead of 0.0
-        loss_D_fake = criterion_GAN(pred_fake, target_fake)
+            # Fake pair: (A, G(A))
+            fake_input = torch.cat([real_A, fake_B_rgb.detach()], dim=1)  # [B, 4, H, W]
+            pred_fake = netD(fake_input)
+            target_fake = torch.zeros_like(pred_fake) + 0.1  # Label smoothing: 0.1 instead of 0.0
+            loss_D_fake = criterion_GAN(pred_fake, target_fake)
 
         loss_D = 0.5 * (loss_D_real + loss_D_fake)
 
         optimizer_D.zero_grad()
-        loss_D.backward()
-        torch.nn.utils.clip_grad_norm_(netD.parameters(), max_norm=1.0)  # Gradient clipping
-        optimizer_D.step()
+        if use_amp and scaler is not None:
+            scaler.scale(loss_D).backward()
+            scaler.unscale_(optimizer_D)
+            torch.nn.utils.clip_grad_norm_(netD.parameters(), max_norm=1.0)
+            scaler.step(optimizer_D)
+            scaler.update()
+        else:
+            loss_D.backward()
+            torch.nn.utils.clip_grad_norm_(netD.parameters(), max_norm=1.0)  # Gradient clipping
+            optimizer_D.step()
 
         # ============================================================
         # (b) Train Generator
         # ============================================================
 
-        fake_B = netG(real_A)  # [B, 2, H, W] if LAB, [B, 3, H, W] if RGB
-        
-        # Convert to RGB for discriminator and perceptual loss
-        if USE_LAB_COLORSPACE:
-            # Combine L channel with predicted AB
-            fake_B_lab_normalized = combine_l_ab(real_A, fake_B)  # [B, 3, H, W]
-            fake_B_lab = denormalize_lab(fake_B_lab_normalized)
-            fake_B_rgb = lab_to_rgb(fake_B_lab)  # [B, 3, H, W] - for discriminator/perceptual
-        else:
-            fake_B_rgb = fake_B
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            fake_B = netG(real_A)  # [B, 2, H, W] if LAB, [B, 3, H, W] if RGB
+            
+            # Convert to RGB for discriminator and perceptual loss
+            if USE_LAB_COLORSPACE:
+                # Combine L channel with predicted AB
+                fake_B_lab_normalized = combine_l_ab(real_A, fake_B)  # [B, 3, H, W]
+                fake_B_lab = denormalize_lab(fake_B_lab_normalized)
+                fake_B_rgb = lab_to_rgb(fake_B_lab)  # [B, 3, H, W] - for discriminator/perceptual
+            else:
+                fake_B_rgb = fake_B
 
-        fake_input_for_G = torch.cat([real_A, fake_B_rgb], dim=1)
-        pred_fake_for_G = netD(fake_input_for_G)
-        target_real_for_G = torch.ones_like(pred_fake_for_G) * 0.9  # Label smoothing: 0.9
+            fake_input_for_G = torch.cat([real_A, fake_B_rgb], dim=1)
+            pred_fake_for_G = netD(fake_input_for_G)
+            target_real_for_G = torch.ones_like(pred_fake_for_G) * 0.9  # Label smoothing: 0.9
 
-        loss_G_GAN = criterion_GAN(pred_fake_for_G, target_real_for_G)
-        
-        # Compute L1/SmoothL1 loss (on AB channels if LAB, RGB if RGB)
-        loss_G_L1 = criterion_L1(fake_B, target_B) * LAMBDA_L1
-        
-        # Compute perceptual loss if enabled (always on RGB)
-        loss_G_perceptual = torch.tensor(0.0, device=device)
-        if USE_PERCEPTUAL_LOSS and criterion_perceptual is not None:
-            loss_G_perceptual = criterion_perceptual(fake_B_rgb, real_B_rgb) * LAMBDA_PERCEPTUAL
+            loss_G_GAN = criterion_GAN(pred_fake_for_G, target_real_for_G)
+            
+            # Compute L1/SmoothL1 loss (on AB channels if LAB, RGB if RGB)
+            loss_G_L1 = criterion_L1(fake_B, target_B) * LAMBDA_L1
+            
+            # Compute perceptual loss if enabled (always on RGB)
+            loss_G_perceptual = torch.tensor(0.0, device=device)
+            if USE_PERCEPTUAL_LOSS and criterion_perceptual is not None:
+                loss_G_perceptual = criterion_perceptual(fake_B_rgb, real_B_rgb) * LAMBDA_PERCEPTUAL
         
         # Total generator loss
         loss_G = loss_G_GAN + loss_G_L1 + loss_G_perceptual
 
         optimizer_G.zero_grad()
-        loss_G.backward()
-        torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=1.0)  # Gradient clipping
-        optimizer_G.step()
+        if use_amp and scaler is not None:
+            scaler.scale(loss_G).backward()
+            scaler.unscale_(optimizer_G)
+            torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=1.0)
+            scaler.step(optimizer_G)
+            scaler.update()
+        else:
+            loss_G.backward()
+            torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=1.0)  # Gradient clipping
+            optimizer_G.step()
 
         # ============================================================
         # (c) Logging
