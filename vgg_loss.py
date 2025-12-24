@@ -5,10 +5,14 @@ Uses pretrained VGG19 to extract features and compute perceptual loss
 that focuses on high-level features rather than pixel-level differences.
 """
 
+import warnings
 import torch
 import torch.nn as nn
 import torchvision.models as models
 from typing import List
+
+# Suppress torchvision deprecation warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
 
 
 class VGGPerceptualLoss(nn.Module):
@@ -27,8 +31,8 @@ class VGGPerceptualLoss(nn.Module):
         """
         super(VGGPerceptualLoss, self).__init__()
         
-        # Load pretrained VGG19
-        vgg = models.vgg19(pretrained=True).features
+        # Load pretrained VGG19 (using new API: weights instead of pretrained)
+        vgg = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1).features
         vgg.eval()
         
         # Freeze VGG parameters

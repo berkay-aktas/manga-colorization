@@ -20,7 +20,15 @@ Handles logging, sample saving, and checkpointing.
 import os
 import signal
 import sys
+import warnings
 from pathlib import Path
+
+# Suppress all PyTorch deprecation warnings BEFORE importing torch
+warnings.simplefilter('ignore', FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning, message='.*deprecated.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
+warnings.filterwarnings('ignore', message='.*torch.cuda.amp.*')
+warnings.filterwarnings('ignore', message='.*torch.amp.*')
 
 import torch
 from torch.utils.data import DataLoader, random_split, ConcatDataset
@@ -241,7 +249,7 @@ def train_one_epoch(
     criterion_L1: torch.nn.Module,
     criterion_perceptual: torch.nn.Module = None,
     device: torch.device = None,
-    scaler: torch.cuda.amp.GradScaler = None,
+    scaler: torch.amp.GradScaler = None,
     use_amp: bool = False,
 ) -> None:
     """
@@ -278,8 +286,8 @@ def train_one_epoch(
         # (a) Train Discriminator
         # ============================================================
 
-        # Use autocast for mixed precision
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        # Use autocast for mixed precision (new API)
+        with torch.amp.autocast('cuda', enabled=use_amp):
             with torch.no_grad():
                 fake_B = netG(real_A)
 
@@ -293,7 +301,7 @@ def train_one_epoch(
             fake_B_rgb = fake_B
         
         # Real pair: (A, B)
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=use_amp):
             real_input = torch.cat([real_A, real_B_rgb], dim=1)  # [B, 4, H, W]
             pred_real = netD(real_input)
             target_real = torch.ones_like(pred_real) * 0.9  # Label smoothing: 0.9 instead of 1.0
@@ -324,7 +332,7 @@ def train_one_epoch(
         # ============================================================
 
         # Generate fake_B in autocast
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=use_amp):
             fake_B = netG(real_A)  # [B, 2, H, W] if LAB, [B, 3, H, W] if RGB
         
         # Convert to RGB for discriminator and perceptual loss (outside autocast - LAB conversion uses CPU)
@@ -337,7 +345,7 @@ def train_one_epoch(
             fake_B_rgb = fake_B
 
         # Discriminator and loss computation in autocast
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=use_amp):
             fake_input_for_G = torch.cat([real_A, fake_B_rgb], dim=1)
             pred_fake_for_G = netD(fake_input_for_G)
             target_real_for_G = torch.ones_like(pred_fake_for_G) * 0.9  # Label smoothing: 0.9
@@ -630,7 +638,8 @@ def main() -> None:
     USE_AMP = True  # Enable mixed precision training
     scaler = None
     if USE_AMP and device.type == 'cuda':
-        scaler = torch.cuda.amp.GradScaler()
+        # Use new API: torch.amp.GradScaler('cuda', ...) instead of torch.cuda.amp.GradScaler()
+        scaler = torch.amp.GradScaler('cuda')
         print("✅ Mixed precision training (FP16) enabled - expect ~2x speedup!")
     else:
         if USE_AMP and device.type != 'cuda':
