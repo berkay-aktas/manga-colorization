@@ -6,3 +6,4 @@ opencv-python
 pillow
 matplotlib
 gradio
+scikit-image>=0.19.0

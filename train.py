@@ -560,16 +560,42 @@ def main() -> None:
         torch.backends.cudnn.benchmark = True
         print("✅ cuDNN benchmark enabled (faster convolutions)")
     
-    # Compile models for faster training (PyTorch 2.0+)
+    # Compile models for fastest training (PyTorch 2.0+)
+    # On Windows, use 'aot_eager' (Triton not available). On Linux, try 'inductor' first.
     USE_COMPILE = True
     if USE_COMPILE and hasattr(torch, 'compile'):
-        try:
-            print("Compiling models with torch.compile()...")
-            netG = torch.compile(netG, mode='reduce-overhead')  # Fast compilation, good for training
-            netD = torch.compile(netD, mode='reduce-overhead')
-            print("✅ Models compiled - expect 20-30% speedup!")
-        except Exception as e:
-            print(f"⚠️  torch.compile() failed: {e}. Continuing without compilation.")
+        import platform
+        is_windows = platform.system() == 'Windows'
+        
+        if is_windows:
+            # Windows: Use aot_eager directly (Triton not available on Windows)
+            try:
+                print("Compiling models with torch.compile() (Windows - using aot_eager backend)...")
+                netG = torch.compile(netG, mode='reduce-overhead', backend='aot_eager')
+                netD = torch.compile(netD, mode='reduce-overhead', backend='aot_eager')
+                print("✅ Models compiled with aot_eager backend - expect ~10-15% speedup!")
+            except Exception as e:
+                print(f"⚠️  torch.compile() failed: {e}")
+                print("   Continuing without compilation (training will still work, just slower)")
+        else:
+            # Linux/Mac: Try inductor first (fastest), fallback to aot_eager
+            try:
+                print("Compiling models with torch.compile()...")
+                try:
+                    netG = torch.compile(netG, mode='reduce-overhead', backend='inductor')
+                    netD = torch.compile(netD, mode='reduce-overhead', backend='inductor')
+                    print("✅ Models compiled with inductor backend (fastest) - expect 20-30% speedup!")
+                except (RuntimeError, ImportError, AttributeError) as e:
+                    if 'triton' in str(e).lower() or 'inductor' in str(e).lower():
+                        print("⚠️  Triton/inductor not available. Falling back to 'aot_eager' backend...")
+                        netG = torch.compile(netG, mode='reduce-overhead', backend='aot_eager')
+                        netD = torch.compile(netD, mode='reduce-overhead', backend='aot_eager')
+                        print("✅ Models compiled with aot_eager backend - expect ~10-15% speedup!")
+                    else:
+                        raise
+            except Exception as e:
+                print(f"⚠️  torch.compile() failed: {e}")
+                print("   Continuing without compilation (training will still work, just slower)")
     elif USE_COMPILE:
         print("⚠️  torch.compile() requires PyTorch 2.0+. Skipping compilation.")
 
@@ -611,19 +637,25 @@ def main() -> None:
             print("⚠️  Mixed precision requires CUDA. Disabling AMP.")
         USE_AMP = False
 
-    RESUME = True  # set False when you want to start from scratch
+    RESUME = False  # set False when you want to start from scratch
 
     # Check for emergency checkpoint first, then regular checkpoint
     CHECKPOINT_PATH = "checkpoints/pix2pix_epoch_28.pth"  # ← change to latest checkpoint
     EMERGENCY_CHECKPOINT = "checkpoints/pix2pix_emergency.pth"
     
+    # Skip emergency checkpoint prompt (set to True to enable prompt)
+    SKIP_EMERGENCY_CHECKPOINT = True
+    
     # Prefer emergency checkpoint if it exists (means training was interrupted)
-    if os.path.exists(EMERGENCY_CHECKPOINT):
+    if not SKIP_EMERGENCY_CHECKPOINT and os.path.exists(EMERGENCY_CHECKPOINT):
         print(f"Found emergency checkpoint: {EMERGENCY_CHECKPOINT}")
         print("This checkpoint was saved when training was interrupted.")
         use_emergency = input("Use emergency checkpoint? (y/n): ").lower().strip() == 'y'
         if use_emergency:
             CHECKPOINT_PATH = EMERGENCY_CHECKPOINT
+    elif os.path.exists(EMERGENCY_CHECKPOINT):
+        print(f"⚠️  Emergency checkpoint found: {EMERGENCY_CHECKPOINT}")
+        print("   Skipping emergency checkpoint (using regular checkpoint path)")
 
     start_epoch = 1
 

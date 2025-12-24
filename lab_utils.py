@@ -6,6 +6,7 @@ LAB separates luminance (L) from color (A, B channels), which is more
 natural for colorization tasks.
 """
 
+import warnings
 import torch
 import numpy as np
 from typing import Tuple
@@ -28,13 +29,15 @@ def rgb_to_lab(rgb: torch.Tensor) -> torch.Tensor:
     rgb = (rgb + 1.0) / 2.0
     rgb = torch.clamp(rgb, 0.0, 1.0)
     
-    # Convert to numpy for skimage
-    rgb_np = rgb.permute(0, 2, 3, 1).cpu().numpy()  # [B, H, W, 3]
+    # Convert to numpy for skimage (detach to avoid gradient issues)
+    rgb_np = rgb.permute(0, 2, 3, 1).cpu().detach().numpy()  # [B, H, W, 3]
     rgb_np = (rgb_np * 255).astype(np.uint8)
     
-    # Convert RGB to LAB using skimage
+    # Convert RGB to LAB using skimage (suppress warnings about clipped values)
     from skimage import color
-    lab_np = color.rgb2lab(rgb_np)  # L: [0, 100], A: [-127, 127], B: [-127, 127]
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=UserWarning, message='.*negative Z values.*')
+        lab_np = color.rgb2lab(rgb_np)  # L: [0, 100], A: [-127, 127], B: [-127, 127]
     
     # Convert back to tensor
     lab = torch.from_numpy(lab_np).permute(0, 3, 1, 2).float()  # [B, 3, H, W]
@@ -52,12 +55,14 @@ def lab_to_rgb(lab: torch.Tensor) -> torch.Tensor:
     Returns:
         RGB tensor [B, 3, H, W] in range [-1, 1] (normalized)
     """
-    # Convert to numpy
-    lab_np = lab.permute(0, 2, 3, 1).cpu().numpy()  # [B, H, W, 3]
+    # Convert to numpy (detach to avoid gradient issues)
+    lab_np = lab.permute(0, 2, 3, 1).cpu().detach().numpy()  # [B, H, W, 3]
     
-    # Convert LAB to RGB using skimage
+    # Convert LAB to RGB using skimage (suppress warnings about clipped values)
     from skimage import color
-    rgb_np = color.lab2rgb(lab_np)  # [0, 1]
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=UserWarning, message='.*negative Z values.*')
+        rgb_np = color.lab2rgb(lab_np)  # [0, 1]
     
     # Clamp to valid range
     rgb_np = np.clip(rgb_np, 0.0, 1.0)

@@ -175,11 +175,15 @@ def create_paired_dataset(color_dir: str,
     if not color_path.exists():
         raise ValueError(f"Color directory not found: {color_dir}")
     
-    # Find all image files
+    # Find all image files (recursively)
     image_files = []
     for ext in extensions:
         image_files.extend(color_path.rglob(f"*{ext}"))
         image_files.extend(color_path.rglob(f"*{ext.upper()}"))
+    
+    # Remove duplicates (Windows is case-insensitive, so .jpg and .JPG find same file)
+    image_files = list(set(image_files))
+    image_files.sort()  # Sort for consistent processing order
     
     if len(image_files) == 0:
         raise ValueError(f"No images found in {color_dir}")
@@ -192,6 +196,7 @@ def create_paired_dataset(color_dir: str,
     # Process each image
     success_count = 0
     failed_count = 0
+    failed_files = []  # Track failed files for cleanup
     
     for img_path in tqdm(image_files, desc="Converting to B/W"):
         # Calculate relative path to preserve directory structure
@@ -203,12 +208,25 @@ def create_paired_dataset(color_dir: str,
             success_count += 1
         else:
             failed_count += 1
+            failed_files.append(str(img_path))  # Save failed file path
     
     print("-" * 60)
     print(f"Processing complete!")
     print(f"  Success: {success_count}")
     print(f"  Failed: {failed_count}")
     print(f"\nB/W images saved to: {bw_path}")
+    
+    # Save list of failed files for cleanup
+    if failed_files:
+        failed_list_path = bw_path.parent / "failed_files.txt"
+        with open(failed_list_path, 'w', encoding='utf-8') as f:
+            for failed_file in failed_files:
+                f.write(f"{failed_file}\n")
+        print(f"\n⚠️  {len(failed_files)} files failed to convert.")
+        print(f"   Failed file list saved to: {failed_list_path}")
+        print(f"   Run cleanup script to delete corrupted color images:")
+        print(f"   python cleanup_failed_images.py")
+    
     print(f"\nYour dataset structure should be:")
     print(f"  {color_dir}/     -> colored images")
     print(f"  {output_bw_dir}/ -> B/W images (paired)")
