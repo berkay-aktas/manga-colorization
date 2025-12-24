@@ -105,12 +105,12 @@ class PairedImageDataset(Dataset):
         if self.augment:
             sketch_img, color_img = self._apply_augmentations(sketch_img, color_img)
         
-        sketch_tensor = SKETCH_TRANSFORM(sketch_img)  # [1, 256, 256]
-        color_tensor = COLOR_TRANSFORM(color_img)    # [3, 256, 256]
+        sketch_tensor = SKETCH_TRANSFORM(sketch_img)  # [1, 512, 512]
+        color_tensor = COLOR_TRANSFORM(color_img)    # [3, 512, 512]
         
         return {
-            "A": sketch_tensor,  # [1, 256, 256]
-            "B": color_tensor    # [3, 256, 256]
+            "A": sketch_tensor,  # [1, 512, 512]
+            "B": color_tensor    # [3, 512, 512]
         }
     
     def _apply_augmentations(self, sketch_img: Image.Image, color_img: Image.Image) -> Tuple[Image.Image, Image.Image]:
