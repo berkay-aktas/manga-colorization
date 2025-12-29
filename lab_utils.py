@@ -31,6 +31,7 @@ def rgb_to_lab(rgb: torch.Tensor) -> torch.Tensor:
     
     # Convert to numpy for skimage (detach to avoid gradient issues)
     rgb_np = rgb.permute(0, 2, 3, 1).cpu().detach().numpy()  # [B, H, W, 3]
+    # Convert to uint8 to match training (yes, this causes quantization, but model was trained with it!)
     rgb_np = (rgb_np * 255).astype(np.uint8)
     
     # Convert RGB to LAB using skimage (suppress warnings about clipped values)
@@ -39,7 +40,7 @@ def rgb_to_lab(rgb: torch.Tensor) -> torch.Tensor:
         warnings.filterwarnings('ignore', category=UserWarning, message='.*negative Z values.*')
         lab_np = color.rgb2lab(rgb_np)  # L: [0, 100], A: [-127, 127], B: [-127, 127]
     
-    # Convert back to tensor
+    # Convert back to tensor  
     lab = torch.from_numpy(lab_np).permute(0, 3, 1, 2).float()  # [B, 3, H, W]
     
     return lab.to(rgb.device)

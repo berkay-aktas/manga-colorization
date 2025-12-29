@@ -60,15 +60,17 @@ USE_BOTH_DATASETS = True
 
 # Training hyperparameters
 NUM_EPOCHS = 150
-BATCH_SIZE = 2  # Reduced from 4 for 512x512 resolution (4x memory usage)
-LR = 2e-4
+BATCH_SIZE = 8  # Optimized for RTX 4060 (8GB) - uses ~6-6.5 GB, ~2.5x faster than batch_size=2
+LR = 1e-4  # Reduced from 2e-4 to prevent NaN with new chroma loss
 BETA1 = 0.5
 BETA2 = 0.999
-LAMBDA_L1 = 50.0  # Reduced from 100 for more vibrant/creative colors (L1 was too high, causing conservative colors)
-LAMBDA_PERCEPTUAL = 12.0  # Slightly increased to compensate for reduced L1 (maintains quality while allowing creativity)
+LAMBDA_L1 = 10.0  # Reduced from 25 to give model more creative freedom for vibrant colors
+LAMBDA_PERCEPTUAL = 10.0  # Reduced to not overpower the GAN loss (allows more color creativity)
+LAMBDA_CHROMA = 2.0  # Reduced from 5.0 to prevent gradient explosion / NaN losses
 USE_PERCEPTUAL_LOSS = True  # Enable VGG perceptual loss for better generalization
 USE_SMOOTH_L1 = True  # Use SmoothL1 instead of L1 (more robust)
 USE_LAB_COLORSPACE = True  # Use LAB color space (L channel input, AB channels output)
+USE_CHROMA_LOSS = True  # Enable chroma loss to fix muddy/neutral colors
 
 # Logging and output
 CHECKPOINT_DIR = "checkpoints"
@@ -85,7 +87,7 @@ USE_EARLY_STOPPING = True  # Enable early stopping if validation loss plateaus
 EARLY_STOPPING_PATIENCE = 15  # Stop if no improvement for N epochs (allows temporary plateaus)
 
 # Data loading
-NUM_WORKERS = 4
+NUM_WORKERS = 6  # Optimized for Ryzen 5 5600X (6 cores)
 PIN_MEMORY = True
 
 # Reproducibility
@@ -154,7 +156,7 @@ def create_data_loaders():
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
         persistent_workers=True if NUM_WORKERS > 0 else False,  # Keep workers alive between epochs
-        prefetch_factor=2,  # Prefetch 2 batches ahead
+        prefetch_factor=4,  # Prefetch 4 batches ahead (faster data loading)
     )
     
     val_loader = DataLoader(
@@ -355,13 +357,26 @@ def train_one_epoch(
             # Compute L1/SmoothL1 loss (on AB channels if LAB, RGB if RGB)
             loss_G_L1 = criterion_L1(fake_B, target_B) * LAMBDA_L1
             
+            # Compute chroma (saturation) loss if using LAB - encourages vibrant colors
+            loss_G_chroma = torch.tensor(0.0, device=device)
+            if USE_CHROMA_LOSS and USE_LAB_COLORSPACE:
+                # Chroma = sqrt(A^2 + B^2)
+                ab2_fake = fake_B[:, 0]**2 + fake_B[:, 1]**2
+                ab2_real = target_B[:, 0]**2 + target_B[:, 1]**2
+
+                fake_chroma = torch.sqrt(torch.clamp(ab2_fake, min=0.0) + 1e-6)
+                real_chroma = torch.sqrt(torch.clamp(ab2_real, min=0.0) + 1e-6)
+
+                loss_G_chroma = torch.nn.functional.l1_loss(fake_chroma, real_chroma) * LAMBDA_CHROMA
+
+            
             # Compute perceptual loss if enabled (always on RGB)
             loss_G_perceptual = torch.tensor(0.0, device=device)
             if USE_PERCEPTUAL_LOSS and criterion_perceptual is not None:
                 loss_G_perceptual = criterion_perceptual(fake_B_rgb, real_B_rgb) * LAMBDA_PERCEPTUAL
         
         # Total generator loss
-        loss_G = loss_G_GAN + loss_G_L1 + loss_G_perceptual
+        loss_G = loss_G_GAN + loss_G_L1 + loss_G_chroma + loss_G_perceptual
 
         optimizer_G.zero_grad()
         if use_amp and scaler is not None:
@@ -388,6 +403,8 @@ def train_one_epoch(
                 f"Loss_G_GAN: {loss_G_GAN.item():.4f} "
                 f"Loss_G_L1: {loss_G_L1.item():.4f}"
             )
+            if USE_CHROMA_LOSS and USE_LAB_COLORSPACE:
+                log_msg += f" Loss_G_Chroma: {loss_G_chroma.item():.4f}"
             if USE_PERCEPTUAL_LOSS and criterion_perceptual is not None:
                 log_msg += f" Loss_G_Perceptual: {loss_G_perceptual.item():.4f}"
             print(log_msg)
@@ -579,8 +596,9 @@ def main() -> None:
             # Windows: Use aot_eager directly (Triton not available on Windows)
             try:
                 print("Compiling models with torch.compile() (Windows - using aot_eager backend)...")
-                netG = torch.compile(netG, mode='reduce-overhead', backend='aot_eager')
-                netD = torch.compile(netD, mode='reduce-overhead', backend='aot_eager')
+                # aot_eager doesn't support mode='reduce-overhead', so we omit it
+                netG = torch.compile(netG, backend='aot_eager')
+                netD = torch.compile(netD, backend='aot_eager')
                 print("✅ Models compiled with aot_eager backend - expect ~10-15% speedup!")
             except Exception as e:
                 print(f"⚠️  torch.compile() failed: {e}")
@@ -596,8 +614,9 @@ def main() -> None:
                 except (RuntimeError, ImportError, AttributeError) as e:
                     if 'triton' in str(e).lower() or 'inductor' in str(e).lower():
                         print("⚠️  Triton/inductor not available. Falling back to 'aot_eager' backend...")
-                        netG = torch.compile(netG, mode='reduce-overhead', backend='aot_eager')
-                        netD = torch.compile(netD, mode='reduce-overhead', backend='aot_eager')
+                        # aot_eager doesn't support mode='reduce-overhead', so we omit it
+                        netG = torch.compile(netG, backend='aot_eager')
+                        netD = torch.compile(netD, backend='aot_eager')
                         print("✅ Models compiled with aot_eager backend - expect ~10-15% speedup!")
                     else:
                         raise
@@ -646,10 +665,10 @@ def main() -> None:
             print("⚠️  Mixed precision requires CUDA. Disabling AMP.")
         USE_AMP = False
 
-    RESUME = False  # set False when you want to start from scratch
+    RESUME = True  # Resume from epoch 18 (fresh optimizers OK with reduced LR)
 
     # Check for emergency checkpoint first, then regular checkpoint
-    CHECKPOINT_PATH = "checkpoints/pix2pix_epoch_28.pth"  # ← change to latest checkpoint
+    CHECKPOINT_PATH = "checkpoints/pix2pix_best_epoch_18.pth"  # Best checkpoint (fresh optimizers at LR=1e-4)
     EMERGENCY_CHECKPOINT = "checkpoints/pix2pix_emergency.pth"
     
     # Skip emergency checkpoint prompt (set to True to enable prompt)

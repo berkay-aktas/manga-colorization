@@ -9,6 +9,10 @@ import gradio as gr
 from networks import UNetGenerator
 from inference_utils import TilingConfig, colorize_with_tiling
 from preprocessing import SKETCH_TRANSFORM
+from lab_utils import (
+    rgb_to_lab, lab_to_rgb, normalize_lab, denormalize_lab,
+    extract_l_channel, extract_ab_channels, combine_l_ab
+)
 
 
 CHECKPOINT_PATH = "checkpoints/pix2pix_best.pth"
@@ -142,8 +146,18 @@ def load_generator(checkpoint_path: str, use_lab: bool = True) -> UNetGenerator:
         state_dict = state["netG_state_dict"]
     else:
         state_dict = state
+        
+    # Fix for models trained with torch.compile() (keys have "_orig_mod." prefix)
+    # The crash proved that keys were mismatching, causing the model to use random weights!
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("_orig_mod."):
+            new_state_dict[k.replace("_orig_mod.", "")] = v
+        else:
+            new_state_dict[k] = v
+    state_dict = new_state_dict
 
-    netG.load_state_dict(state_dict, strict=False)  # Allow minor mismatches
+    netG.load_state_dict(state_dict, strict=True)  # Enforce strict matching to catch architecture issues
     netG.to(DEVICE)
     netG.eval()
 
@@ -157,11 +171,15 @@ def load_generator(checkpoint_path: str, use_lab: bool = True) -> UNetGenerator:
 
 def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option: bool = False, use_lab: bool = True) -> Image.Image:
     """
-    Gradio callback:
-    - takes a PIL image (B/W manga panel)
-    - returns a colorized image resized back to original size
+    Colorize the input image using the selected checkpoint.
+    
+    Args:
+        input_image: PIL Image input (B/W or sketch)
+        checkpoint_label: Name of the checkpoint to use
+        use_tiling_option: Whether to use tiling for processing
+        use_lab: Whether to use LAB color space (default True)
     """
-
+    # ... rest of function ...
     if input_image is None:
         return None
 
@@ -181,7 +199,7 @@ def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option:
     # Import LAB utilities if needed
     if use_lab:
         from lab_utils import combine_l_ab, denormalize_lab, lab_to_rgb
-    
+
     if use_tiling:
         # For large images, use tiling (will have some artifacts)
         fake_B = colorize_with_tiling(
@@ -200,7 +218,10 @@ def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option:
                 gray_tensor = torch.nn.functional.interpolate(
                     gray_tensor, size=fake_B.shape[2:], mode='bilinear', align_corners=False
                 )
-            fake_B_lab_norm = combine_l_ab(gray_tensor, fake_B)  # [1, 3, H, W]
+            
+            # Use normalized grayscale directly as L channel (matching training)
+            fake_B_clamped = torch.clamp(fake_B, -1.0, 1.0)
+            fake_B_lab_norm = combine_l_ab(gray_tensor, fake_B_clamped)  # [1, 3, H, W]
             fake_B_lab = denormalize_lab(fake_B_lab_norm)
             fake_B_rgb = lab_to_rgb(fake_B_lab)  # [1, 3, H, W]
             fake_B = fake_B_rgb
@@ -216,14 +237,22 @@ def colorize(input_image: Image.Image, checkpoint_label: str, use_tiling_option:
         
         # Convert LAB to RGB if needed
         if use_lab:
-            fake_B_lab_norm = combine_l_ab(tensor, fake_B)  # [1, 3, H, W]
+            # Use normalized grayscale directly as L channel (matching training)
+            fake_B_clamped = torch.clamp(fake_B, -1.0, 1.0)
+            
+            fake_B_lab_norm = combine_l_ab(tensor, fake_B_clamped)  # [1, 3, H, W]
             fake_B_lab = denormalize_lab(fake_B_lab_norm)
             fake_B_rgb = lab_to_rgb(fake_B_lab)  # [1, 3, H, W]
+            
             fake_B = fake_B_rgb
+        
+        # lab_to_rgb already returns in [-1, 1]
 
-        fake_B = torch.clamp((fake_B + 1.0) / 2.0, 0.0, 1.0)
+        # Use the same denormalization as training's save_image function
+        from utils import denormalize
+        fake_B_denorm = denormalize(fake_B)  # [0, 1]
         fake_img = fake_B.squeeze(0).cpu()
-        fake_img = transforms.ToPILImage()(fake_img)
+        fake_img = transforms.ToPILImage()(fake_B_denorm.squeeze(0).cpu())
         fake_img = fake_img.resize((orig_w, orig_h), Image.BICUBIC)
 
     return fake_img
@@ -256,6 +285,12 @@ with gr.Blocks(title="Manga Colorization Demo") as demo:
                 label="Use High-Resolution Tiling (may have color artifacts)",
                 info="Uncheck to avoid prismatic/rainbow effects. Will resize images instead."
             )
+            use_lab_checkbox = gr.Checkbox(
+                value=False,
+                label="Use LAB Color Space",
+                info="Only check this if you're using a LAB-trained checkpoint. RGB checkpoints work better."
+            )
+            
             run_btn = gr.Button("Colorize")
         with gr.Column(scale=1):
             output_color = gr.Image(
@@ -265,7 +300,7 @@ with gr.Blocks(title="Manga Colorization Demo") as demo:
 
     run_btn.click(
         fn=colorize,
-        inputs=[input_img, checkpoint_selector, use_tiling_checkbox],
+        inputs=[input_img, checkpoint_selector, use_tiling_checkbox, use_lab_checkbox],
         outputs=output_color,
     )
 
