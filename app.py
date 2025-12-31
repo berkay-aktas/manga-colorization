@@ -280,16 +280,6 @@ with gr.Blocks(title="Manga Colorization Demo") as demo:
                 label="Choose Checkpoint",
                 interactive=True,
             )
-            use_tiling_checkbox = gr.Checkbox(
-                value=False,
-                label="Use High-Resolution Tiling (may have color artifacts)",
-                info="Uncheck to avoid prismatic/rainbow effects. Will resize images instead."
-            )
-            use_lab_checkbox = gr.Checkbox(
-                value=False,
-                label="Use LAB Color Space",
-                info="Only check this if you're using a LAB-trained checkpoint. RGB checkpoints work better."
-            )
             
             run_btn = gr.Button("Colorize")
         with gr.Column(scale=1):
@@ -299,8 +289,8 @@ with gr.Blocks(title="Manga Colorization Demo") as demo:
             )
 
     run_btn.click(
-        fn=colorize,
-        inputs=[input_img, checkpoint_selector, use_tiling_checkbox, use_lab_checkbox],
+        fn=lambda img, ckpt: colorize(img, ckpt, use_tiling_option=False, use_lab=True),
+        inputs=[input_img, checkpoint_selector],
         outputs=output_color,
     )
 
