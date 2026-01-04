@@ -48,46 +48,41 @@ from lab_utils import (
 # ============================================================================#
 
 # Data roots (paired datasets)
-# Old dataset (12k matched pairs)
-OLD_MANGA_SKETCH_DIR = "data/manga_dataset/bw"
-OLD_MANGA_COLOR_DIR = "data/manga_dataset/color"
+MANGA_SKETCH_DIR = "data/manga/bw"
+MANGA_COLOR_DIR = "data/manga/color"
 
-# New dataset (colored_manga - make sure B/W conversion is complete!)
-NEW_MANGA_SKETCH_DIR = "data/colored_manga/bw"
-NEW_MANGA_COLOR_DIR = "data/colored_manga/color_full"
-
-USE_BOTH_DATASETS = True
+USE_BOTH_DATASETS = False  # Set to True to use multiple datasets
 
 # Training hyperparameters
-NUM_EPOCHS = 150
-BATCH_SIZE = 8  # Optimized for RTX 4060 (8GB) - uses ~6-6.5 GB, ~2.5x faster than batch_size=2
-LR = 1e-4  # Reduced from 2e-4 to prevent NaN with new chroma loss
+NUM_EPOCHS = 50
+BATCH_SIZE = 8  # Adjust based on available GPU memory
+LR = 2e-4
 BETA1 = 0.5
 BETA2 = 0.999
-LAMBDA_L1 = 10.0  # Reduced from 25 to give model more creative freedom for vibrant colors
-LAMBDA_PERCEPTUAL = 10.0  # Reduced to not overpower the GAN loss (allows more color creativity)
-LAMBDA_CHROMA = 2.0  # Reduced from 5.0 to prevent gradient explosion / NaN losses
-USE_PERCEPTUAL_LOSS = True  # Enable VGG perceptual loss for better generalization
-USE_SMOOTH_L1 = True  # Use SmoothL1 instead of L1 (more robust)
-USE_LAB_COLORSPACE = True  # Use LAB color space (L channel input, AB channels output)
-USE_CHROMA_LOSS = True  # Enable chroma loss to fix muddy/neutral colors
+LAMBDA_L1 = 50.0
+LAMBDA_PERCEPTUAL = 12.0
+LAMBDA_CHROMA = 2.0
+USE_PERCEPTUAL_LOSS = True
+USE_SMOOTH_L1 = True
+USE_LAB_COLORSPACE = True
+USE_CHROMA_LOSS = True
 
 # Logging and output
 CHECKPOINT_DIR = "checkpoints"
 SAMPLE_DIR = "samples"
-LOG_INTERVAL = 1000  # iterations
-SAMPLE_INTERVAL = 5000  # iterations
+LOG_INTERVAL = 1000
+SAMPLE_INTERVAL = 5000
 
 # Checkpoint management
-KEEP_LAST_N_CHECKPOINTS = 3  # Keep only last N checkpoints to save disk space
-SAVE_CHECKPOINT_INTERVAL = 5  # Save checkpoint every N epochs (set to 1 to save every epoch)
+KEEP_LAST_N_CHECKPOINTS = 3
+SAVE_CHECKPOINT_INTERVAL = 5
 
 # Early stopping
-USE_EARLY_STOPPING = True  # Enable early stopping if validation loss plateaus
-EARLY_STOPPING_PATIENCE = 15  # Stop if no improvement for N epochs (allows temporary plateaus)
+USE_EARLY_STOPPING = True
+EARLY_STOPPING_PATIENCE = 15
 
 # Data loading
-NUM_WORKERS = 6  # Optimized for Ryzen 5 5600X (6 cores)
+NUM_WORKERS = 4  # Adjust based on CPU cores
 PIN_MEMORY = True
 
 # Reproducibility
@@ -106,37 +101,26 @@ def create_data_loaders():
     """
     datasets = []
     
-    # Old dataset (12k matched pairs)
-    if USE_BOTH_DATASETS:
-        try:
-            old_dataset = PairedImageDataset(
-                sketch_dir=OLD_MANGA_SKETCH_DIR,
-                color_dir=OLD_MANGA_COLOR_DIR,
-                augment=True,
-            )
-            datasets.append(old_dataset)
-            print(f"Loaded old dataset: {len(old_dataset)} pairs")
-        except Exception as e:
-            print(f"Warning: Could not load old dataset: {e}")
-    
-    # New dataset (colored_manga)
+    # Paired Manga Dataset
     try:
-        new_dataset = PairedImageDataset(
-            sketch_dir=NEW_MANGA_SKETCH_DIR,
-            color_dir=NEW_MANGA_COLOR_DIR,
+        dataset = PairedImageDataset(
+            sketch_dir=MANGA_SKETCH_DIR,
+            color_dir=MANGA_COLOR_DIR,
             augment=True,
         )
-        datasets.append(new_dataset)
-        print(f"Loaded new dataset: {len(new_dataset)} pairs")
+        datasets.append(dataset)
+        print(f"Loaded dataset: {len(dataset)} pairs")
     except Exception as e:
-        print(f"Warning: Could not load new dataset: {e}")
+        print(f"Error loading dataset: {e}")
         if not USE_BOTH_DATASETS:
             raise
-    
-    # Combine datasets if using both
+
+    # Combine datasets if using multiple (configured via constants)
     if len(datasets) > 1:
         manga_dataset = ConcatDataset(datasets)
     else:
+        if not datasets:
+            raise ValueError("No datasets loaded!")
         manga_dataset = datasets[0]
     
     # Split into train/val (80/20)
@@ -665,14 +649,14 @@ def main() -> None:
             print("⚠️  Mixed precision requires CUDA. Disabling AMP.")
         USE_AMP = False
 
-    RESUME = True  # Resume from epoch 18 (fresh optimizers OK with reduced LR)
+    RESUME = False  # Set to True to resume training from a checkpoint
 
     # Check for emergency checkpoint first, then regular checkpoint
-    CHECKPOINT_PATH = "checkpoints/pix2pix_best_epoch_18.pth"  # Best checkpoint (fresh optimizers at LR=1e-4)
+    CHECKPOINT_PATH = "checkpoints/pix2pix_best.pth"
     EMERGENCY_CHECKPOINT = "checkpoints/pix2pix_emergency.pth"
     
     # Skip emergency checkpoint prompt (set to True to enable prompt)
-    SKIP_EMERGENCY_CHECKPOINT = True
+    SKIP_EMERGENCY_CHECKPOINT = False
     
     # Prefer emergency checkpoint if it exists (means training was interrupted)
     if not SKIP_EMERGENCY_CHECKPOINT and os.path.exists(EMERGENCY_CHECKPOINT):
@@ -682,8 +666,8 @@ def main() -> None:
         if use_emergency:
             CHECKPOINT_PATH = EMERGENCY_CHECKPOINT
     elif os.path.exists(EMERGENCY_CHECKPOINT):
-        print(f"⚠️  Emergency checkpoint found: {EMERGENCY_CHECKPOINT}")
-        print("   Skipping emergency checkpoint (using regular checkpoint path)")
+        print(f"Emergency checkpoint found: {EMERGENCY_CHECKPOINT}")
+        print("Skipping emergency checkpoint (using regular checkpoint path)")
 
     start_epoch = 1
 
