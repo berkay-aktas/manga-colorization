@@ -27,7 +27,7 @@ This ensures that the fine line art of the manga is never blurred or distorted, 
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/yourusername/manga-colorization.git
+    git clone https://github.com/berkay-aktas/manga-colorization.git
     cd manga-colorization
     ```
 
